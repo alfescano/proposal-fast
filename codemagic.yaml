@@ -1,9 +1,10 @@
 workflows:
   react-native-workflow:
     name: ProposalFast Mobile Build
-    instance_type: mac_mini_m1
     max_build_duration: 120
     environment:
+      os: macos
+      arch: arm64
       node: 18
       xcode: latest
       java: 11
