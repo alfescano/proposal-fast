@@ -1,29 +1,18 @@
 workflows:
-  react-native-workflow:
-    name: ProposalFast Mobile Build
-    max_build_duration: 120
+  build-app:
+    name: ProposalFast Build
     environment:
-      os: macos
-      arch: arm64
       node: 18
-      xcode: latest
-      java: 11
     triggering:
       events:
         - push
       branch:
         include:
           - main
-          - develop
     scripts:
-      - name: Install dependencies
-        script: |
-          npm install --legacy-peer-deps
-          npm install -g eas-cli
-          npm install -g expo-cli
-      - name: Build for Android
-        script: |
-          eas build --platform android --non-interactive
-      - name: Build for iOS
-        script: |
-          eas build --platform ios --non-interactive
+      - name: Install
+        script: npm install --legacy-peer-deps
+      - name: Build Android
+        script: npm run build:android
+      - name: Build iOS
+        script: npm run build:ios
