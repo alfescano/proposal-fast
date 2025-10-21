@@ -1,0 +1,54 @@
+workflows:
+  react-native-workflow:
+    name: ProposalFast CI/CD
+    max_build_duration: 120
+    environment:
+      node: 18
+      xcode: latest
+      java: 11
+      groups:
+        - github_credentials
+        - app_store_credentials
+        - google_play_credentials
+    triggering:
+      events:
+        - push
+      branch:
+        include:
+          - main
+          - develop
+      cancel_previous_builds: true
+
+    scripts:
+      - name: Install dependencies
+        script: |
+          npm install --legacy-peer-deps
+          npm install -g eas-cli
+
+      - name: Setup Expo credentials
+        script: |
+          mkdir -p ~/.expo
+          echo $EXPO_TOKEN > ~/.expo/token
+
+      - name: Build iOS
+        script: |
+          eas build --platform ios --auto-submit --non-interactive
+
+      - name: Build Android
+        script: |
+          eas build --platform android --auto-submit --non-interactive
+
+    publishing:
+      email:
+        recipients:
+          - your-email@example.com
+        notify:
+          success: true
+          failure: true
+
+      slack:
+        channel: '#deployments'
+        notify_on_build_start: true
+        notify:
+          success: true
+          failure: true
