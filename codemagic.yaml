@@ -1,25 +1,18 @@
 workflows:
-  build-app:
-    name: ProposalFast Mobile Build
+  react-native:
+    name: React Native Workflow
     max_build_duration: 120
+    instance_type: mac_mini_m1
     environment:
-      node: latest
+      node: 18
+      xcode: latest
     triggering:
       events:
         - push
       branch:
-        include:
-          - main
+        pattern: 'main'
     scripts:
-      - name: Install dependencies
-        script: |
-          npm install
-      - name: Install EAS CLI
-        script: |
-          npm install -g eas-cli
-      - name: Build Android
-        script: |
-          eas build --platform android --non-interactive
-      - name: Build iOS
-        script: |
-          eas build --platform ios --non-interactive
+      - name: Install
+        script: npm install
+      - name: Build
+        script: npm run build
