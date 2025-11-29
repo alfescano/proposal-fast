@@ -15,7 +15,11 @@ export default function Login() {
       <div className="w-full max-w-md">
         {/* Back Button */}
         <Link to="/" className="inline-flex mb-6">
-          <Button variant="ghost" size="sm" className="hover:bg-slate-800 text-slate-300">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="hover:bg-slate-800 text-slate-300"
+          >
             <ArrowLeft className="w-4 h-4 mr-2" />
             Back to Home
           </Button>
@@ -24,7 +28,9 @@ export default function Login() {
         {/* Sign In Component */}
         <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-8 backdrop-blur">
           <h1 className="text-2xl font-bold text-white mb-2">Welcome back</h1>
-          <p className="text-slate-400 mb-6">Sign in to ProposalFast to generate contracts</p>
+          <p className="text-slate-400 mb-6">
+            Sign in to ProposalFast to generate contracts
+          </p>
 
           <SignIn
             routing="path"
@@ -38,7 +44,8 @@ export default function Login() {
                 card: "bg-transparent shadow-none",
                 socialButtonsBlockButton:
                   "bg-slate-700 hover:bg-slate-600 text-white border-slate-600 w-full",
-                formButtonPrimary: "bg-blue-600 hover:bg-blue-700 text-white w-full",
+                formButtonPrimary:
+                  "bg-blue-600 hover:bg-blue-700 text-white w-full",
                 footerActionLink: "text-blue-400 hover:text-blue-300",
                 formFieldInput:
                   "bg-slate-700/50 border-slate-600 text-white placeholder:text-slate-500",
@@ -48,7 +55,7 @@ export default function Login() {
               },
             }}
           />
-        </div> ✅✅ CLOSE THE CARD PROPERLY
+        </div>
 
         {/* Footer */}
         <p className="text-center text-slate-400 text-sm mt-6">
