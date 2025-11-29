@@ -27,6 +27,11 @@ export default function Login() {
           <p className="text-slate-400 mb-6">Sign in to ProposalFast to generate contracts</p>
 
           <SignIn
+            routing="path"
+            path="/login"
+            signUpUrl="/login"
+            afterSignInUrl="/dashboard"
+            afterSignUpUrl="/dashboard"
             appearance={{
               elements: {
                 rootBox: "w-full",
@@ -42,10 +47,8 @@ export default function Login() {
                 dividerText: "text-slate-400",
               },
             }}
-            signUpUrl="/login"
-            routing="hash"
           />
-        </div>
+        </div> ✅✅ CLOSE THE CARD PROPERLY
 
         {/* Footer */}
         <p className="text-center text-slate-400 text-sm mt-6">
