@@ -1,7 +1,9 @@
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { BrandKitProvider } from "@/contexts/BrandKitContext";
+import { AuthProvider } from "@/contexts/AuthContext"; // <-- You removed this earlier
 import ErrorBoundary from "@/components/ErrorBoundary";
+
 import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
 import Dashboard from "@/pages/Dashboard";
@@ -18,9 +20,8 @@ import Privacy from "@/pages/Privacy";
 import Refund from "@/pages/Refund";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import NotFound from "@/pages/NotFound";
-import Signup from "./pages/SignUp";
+import Signup from "@/pages/SignUp";
 
-// ❗ Must import Clerk callback handler
 import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
 
 export default function App() {
@@ -28,91 +29,101 @@ export default function App() {
     <ErrorBoundary>
       <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
         <BrandKitProvider>
-          <Router>
-            <Routes>
-              <Route path="/" element={<Landing />} />
-              <Route path="/login" element={<Login />} />
-              <Route path="/signup" element={<Signup />} />
+          {/* ✅ RESTORE AUTH PROVIDER HERE */}
+          <AuthProvider>
+            <Router>
+              <Routes>
+                <Route path="/" element={<Landing />} />
+                <Route path="/login" element={<Login />} />
+                <Route path="/signup" element={<Signup />} />
 
-              {/* ❗ CRITICAL: Needed for Google login redirect */}
-              <Route
-                path="/login/sso-callback"
-                element={<AuthenticateWithRedirectCallback />}
-              />
+                {/* CRITICAL: Google / SSO callback */}
+                <Route
+                  path="/login/sso-callback"
+                  element={<AuthenticateWithRedirectCallback />}
+                />
 
-              <Route path="/pricing" element={<Pricing />} />
-              <Route path="/terms" element={<Terms />} />
-              <Route path="/privacy" element={<Privacy />} />
-              <Route path="/refund" element={<Refund />} />
+                <Route path="/pricing" element={<Pricing />} />
+                <Route path="/terms" element={<Terms />} />
+                <Route path="/privacy" element={<Privacy />} />
+                <Route path="/refund" element={<Refund />} />
 
-              <Route
-                path="/dashboard"
-                element={
-                  <ProtectedRoute>
-                    <Dashboard />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/generator"
-                element={
-                  <ProtectedRoute>
-                    <Generator />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/teams"
-                element={
-                  <ProtectedRoute>
-                    <Teams />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/crm-settings"
-                element={
-                  <ProtectedRoute>
-                    <CRMSettings />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/calendar-settings"
-                element={
-                  <ProtectedRoute>
-                    <CalendarSettings />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/notifications"
-                element={
-                  <ProtectedRoute>
-                    <NotificationSettings />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/webhooks"
-                element={
-                  <ProtectedRoute>
-                    <WebhookSettings />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/brand-kit"
-                element={
-                  <ProtectedRoute>
-                    <BrandKitSettings />
-                  </ProtectedRoute>
-                }
-              />
+                <Route
+                  path="/dashboard"
+                  element={
+                    <ProtectedRoute>
+                      <Dashboard />
+                    </ProtectedRoute>
+                  }
+                />
 
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </Router>
+                <Route
+                  path="/generator"
+                  element={
+                    <ProtectedRoute>
+                      <Generator />
+                    </ProtectedRoute>
+                  }
+                />
+
+                <Route
+                  path="/teams"
+                  element={
+                    <ProtectedRoute>
+                      <Teams />
+                    </ProtectedRoute>
+                  }
+                />
+
+                <Route
+                  path="/crm-settings"
+                  element={
+                    <ProtectedRoute>
+                      <CRMSettings />
+                    </ProtectedRoute>
+                  }
+                />
+
+                <Route
+                  path="/calendar-settings"
+                  element={
+                    <ProtectedRoute>
+                      <CalendarSettings />
+                    </ProtectedRoute>
+                  }
+                />
+
+                <Route
+                  path="/notifications"
+                  element={
+                    <ProtectedRoute>
+                      <NotificationSettings />
+                    </ProtectedRoute>
+                  }
+                />
+
+                <Route
+                  path="/webhooks"
+                  element={
+                    <ProtectedRoute>
+                      <WebhookSettings />
+                    </ProtectedRoute>
+                  }
+                />
+
+                <Route
+                  path="/brand-kit"
+                  element={
+                    <ProtectedRoute>
+                      <BrandKitSettings />
+                    </ProtectedRoute>
+                  }
+                />
+
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </Router>
+          </AuthProvider>
         </BrandKitProvider>
       </ThemeProvider>
     </ErrorBoundary>
