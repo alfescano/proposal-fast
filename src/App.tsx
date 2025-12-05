@@ -20,6 +20,9 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import NotFound from "@/pages/NotFound";
 import Signup from "./pages/SignUp";
 
+// ❗ Must import Clerk callback handler
+import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
+
 export default function App() {
   return (
     <ErrorBoundary>
@@ -30,6 +33,13 @@ export default function App() {
               <Route path="/" element={<Landing />} />
               <Route path="/login" element={<Login />} />
               <Route path="/signup" element={<Signup />} />
+
+              {/* ❗ CRITICAL: Needed for Google login redirect */}
+              <Route
+                path="/login/sso-callback"
+                element={<AuthenticateWithRedirectCallback />}
+              />
+
               <Route path="/pricing" element={<Pricing />} />
               <Route path="/terms" element={<Terms />} />
               <Route path="/privacy" element={<Privacy />} />
