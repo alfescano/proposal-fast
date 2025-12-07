@@ -7,13 +7,12 @@ import { events } from "@/lib/analytics";
 
 export default function Login() {
   useEffect(() => {
-    events.signupStarted();
+    events.signupStarted?.();
   }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        {/* Back Button */}
         <Link to="/" className="inline-flex mb-6">
           <Button
             variant="ghost"
@@ -25,7 +24,6 @@ export default function Login() {
           </Button>
         </Link>
 
-        {/* Sign In Component */}
         <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-8 backdrop-blur">
           <h1 className="text-2xl font-bold text-white mb-2">Welcome back</h1>
           <p className="text-slate-400 mb-6">
@@ -35,7 +33,7 @@ export default function Login() {
           <SignIn
             routing="path"
             path="/login"
-            signUpUrl="/login"
+            signUpUrl="/signup"          // ✅ FIX
             afterSignInUrl="/dashboard"
             afterSignUpUrl="/dashboard"
             appearance={{
@@ -57,7 +55,6 @@ export default function Login() {
           />
         </div>
 
-        {/* Footer */}
         <p className="text-center text-slate-400 text-sm mt-6">
           Ready to generate your first contract?
         </p>
