@@ -3,7 +3,11 @@ import { Card } from "@/components/ui/card";
 import { Check, ArrowLeft } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuthContext } from "@/contexts/AuthContext";
-import { PRICING_PLANS, createCheckoutSession, stripePromise } from "@/lib/stripe";
+import {
+  PRICING_PLANS,
+  createCheckoutSession,
+  stripePromise,
+} from "@/lib/stripe";
 import { toast } from "sonner";
 import { useState, useEffect } from "react";
 import { events, updateFunnelStage } from "@/lib/analytics";
@@ -14,31 +18,37 @@ export default function Pricing() {
   const [loading, setLoading] = useState<string | null>(null);
 
   useEffect(() => {
-    events.pricingViewed();
+    // Safely track pricing page view
+    events?.pricingViewed?.();
     if (userProfile?.id) {
-      updateFunnelStage(userProfile.id, "pricing");
+      updateFunnelStage?.(userProfile.id, "pricing");
     }
   }, [userProfile?.id]);
 
   const handleCheckout = async (planId: string) => {
+    // If user is not logged in, send them to login first
     if (!userProfile) {
       navigate("/login");
       return;
     }
 
+    // FREE PLAN: no Stripe – just activate free tier in-app
     if (planId === "free") {
-      toast.success("Free plan activated!");
+      toast.success("Free plan activated! You can generate up to 5 contracts per month.");
+      // Optionally send them to dashboard
+      navigate("/dashboard");
       return;
     }
 
+    // ENTERPRISE: open email to sales
     if (planId === "enterprise") {
-      toast.info("Please contact our sales team");
+      toast.info("Opening your email client to contact our sales team.");
       window.location.href = "mailto:sales@proposalfast.com";
       return;
     }
 
-    // Track checkout initiated
-    events.checkoutInitiated(planId);
+    // PRO / PAID PLANS
+    events?.checkoutInitiated?.(planId);
 
     setLoading(planId);
     try {
@@ -56,7 +66,10 @@ export default function Pricing() {
         toast.error(result.error.message || "Checkout failed");
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Checkout failed");
+      console.error(error);
+      toast.error(
+        error instanceof Error ? error.message : "Checkout failed"
+      );
     } finally {
       setLoading(null);
     }
@@ -87,7 +100,7 @@ export default function Pricing() {
           Pricing Plans Designed for Growth
         </h1>
         <p className="text-xl text-slate-300 max-w-2xl mx-auto">
-          Start Free – Only Pay When You See Results
+          Start free – upgrade only when you need more power.
         </p>
       </section>
 
@@ -149,7 +162,10 @@ export default function Pricing() {
 
         {/* Guarantee Box */}
         <div className="mt-12 bg-blue-900/30 border border-blue-500/50 rounded-lg p-8 text-center">
-          <p className="text-xl font-semibold">Guarantee: Close 1 client and your subscription pays for itself. Cancel anytime.</p>
+          <p className="text-xl font-semibold">
+            Close one client and your subscription pays for itself. Cancel
+            anytime.
+          </p>
         </div>
       </section>
 
@@ -165,7 +181,8 @@ export default function Pricing() {
                 Q: Can I cancel anytime?
               </h3>
               <p className="text-slate-400">
-                A: Yes, there are no long-term contracts. You can cancel your subscription at any time from your account settings.
+                A: Yes, there are no long-term contracts. You can cancel your
+                subscription at any time from your account settings.
               </p>
             </div>
             <div>
@@ -173,7 +190,8 @@ export default function Pricing() {
                 Q: Do you offer refunds?
               </h3>
               <p className="text-slate-400">
-                A: Yes, if you don't see value within 7 days, you can request a full refund.
+                A: Yes, if you don't see value within 7 days, you can request a
+                full refund.
               </p>
             </div>
             <div>
@@ -181,7 +199,9 @@ export default function Pricing() {
                 Q: Is there a free trial?
               </h3>
               <p className="text-slate-400">
-                A: Yes! The Starter Plan is completely free with no credit card required. Try unlimited proposal generation at no cost.
+                A: Yes. The Free plan lets you generate up to{" "}
+                <span className="text-slate-200 font-semibold">5 contracts per month</span>{" "}
+                at no cost. When you need more, you can upgrade to Pro.
               </p>
             </div>
           </div>
