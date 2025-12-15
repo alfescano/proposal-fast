@@ -3,13 +3,9 @@ import { Card } from "@/components/ui/card";
 import { Check, ArrowLeft } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuthContext } from "@/contexts/AuthContext";
-import {
-  PRICING_PLANS,
-  createCheckoutSession,
-  stripePromise,
-} from "@/lib/stripe";
+import { PRICING_PLANS, createCheckoutSession, stripePromise } from "@/lib/stripe";
 import { toast } from "sonner";
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { events, updateFunnelStage } from "@/lib/analytics";
 
 export default function Pricing() {
@@ -18,39 +14,51 @@ export default function Pricing() {
   const [loading, setLoading] = useState<string | null>(null);
 
   useEffect(() => {
-    // Safely track pricing page view
     events?.pricingViewed?.();
-    if (userProfile?.id) {
-      updateFunnelStage?.(userProfile.id, "pricing");
-    }
+    if (userProfile?.id) updateFunnelStage?.(userProfile.id, "pricing");
   }, [userProfile?.id]);
 
+  const openContactSales = () => {
+    const subject = encodeURIComponent("ProposalFast Enterprise - Contact Sales");
+    const body = encodeURIComponent(
+      `Hi ProposalFast team,\n\nI'm interested in the Enterprise plan.\n\nCompany/Team size:\nUse case:\nBest email to reach me:\n\nThanks!`
+    );
+
+    // Using window.open improves reliability vs href in some browsers
+    window.open(`mailto:sales@proposalfast.com?subject=${subject}&body=${body}`, "_self");
+  };
+
   const handleCheckout = async (planId: string) => {
-    // If user is not logged in, send them to login first
+    // Require login before any plan action
     if (!userProfile) {
+      toast.info("Please sign in to continue.");
       navigate("/login");
       return;
     }
 
-    // FREE PLAN: no Stripe – just activate free tier in-app
+    // Free plan = no Stripe checkout
     if (planId === "free") {
-      toast.success("Free plan activated! You can generate up to 5 contracts per month.");
-      // Optionally send them to dashboard
+      toast.success("Free plan activated! Limit: 5 contracts/month.");
       navigate("/dashboard");
       return;
     }
 
-    // ENTERPRISE: open email to sales
+    // Enterprise contact sales
     if (planId === "enterprise") {
-      toast.info("Opening your email client to contact our sales team.");
-      window.location.href = "mailto:sales@proposalfast.com";
+      toast.info("Opening contact sales…");
+      openContactSales();
       return;
     }
 
-    // PRO / PAID PLANS
-    events?.checkoutInitiated?.(planId);
+    // Paid plans require Stripe configured
+    if (!stripePromise) {
+      toast.error("Stripe is not configured (missing VITE_STRIPE_PUBLIC_KEY).");
+      return;
+    }
 
+    events?.checkoutInitiated?.(planId);
     setLoading(planId);
+
     try {
       const sessionId = await createCheckoutSession(
         userProfile.id,
@@ -65,11 +73,9 @@ export default function Pricing() {
       if (result.error) {
         toast.error(result.error.message || "Checkout failed");
       }
-    } catch (error) {
-      console.error(error);
-      toast.error(
-        error instanceof Error ? error.message : "Checkout failed"
-      );
+    } catch (err) {
+      console.error("Checkout error:", err);
+      toast.error(err instanceof Error ? err.message : "Checkout failed");
     } finally {
       setLoading(null);
     }
@@ -137,6 +143,7 @@ export default function Pricing() {
               </div>
 
               <Button
+                type="button"
                 onClick={() => handleCheckout(plan.id)}
                 disabled={loading === plan.id}
                 className={`w-full mb-8 py-6 text-base font-semibold ${
@@ -160,51 +167,10 @@ export default function Pricing() {
           ))}
         </div>
 
-        {/* Guarantee Box */}
         <div className="mt-12 bg-blue-900/30 border border-blue-500/50 rounded-lg p-8 text-center">
           <p className="text-xl font-semibold">
-            Close one client and your subscription pays for itself. Cancel
-            anytime.
+            Close one client and your subscription pays for itself. Cancel anytime.
           </p>
-        </div>
-      </section>
-
-      {/* FAQ */}
-      <section className="border-t border-slate-700/50 py-16">
-        <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8">
-          <h2 className="text-3xl font-bold text-center mb-12">
-            Frequently Asked Pricing Questions
-          </h2>
-          <div className="space-y-8">
-            <div>
-              <h3 className="text-lg font-semibold mb-2">
-                Q: Can I cancel anytime?
-              </h3>
-              <p className="text-slate-400">
-                A: Yes, there are no long-term contracts. You can cancel your
-                subscription at any time from your account settings.
-              </p>
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold mb-2">
-                Q: Do you offer refunds?
-              </h3>
-              <p className="text-slate-400">
-                A: Yes, if you don't see value within 7 days, you can request a
-                full refund.
-              </p>
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold mb-2">
-                Q: Is there a free trial?
-              </h3>
-              <p className="text-slate-400">
-                A: Yes. The Free plan lets you generate up to{" "}
-                <span className="text-slate-200 font-semibold">5 contracts per month</span>{" "}
-                at no cost. When you need more, you can upgrade to Pro.
-              </p>
-            </div>
-          </div>
         </div>
       </section>
 
