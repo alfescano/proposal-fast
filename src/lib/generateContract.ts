@@ -1,5 +1,6 @@
 import { buildMemoryContext } from "./aiMemory";
 import { supabase } from "./supabase";
+import { getUserSubscription, getContractLimit } from "./subscriptionUtils";
 
 export async function generateContract(params: {
   contractType: string;
@@ -10,20 +11,37 @@ export async function generateContract(params: {
   timeline: string;
   useMemory?: boolean;
 }): Promise<string> {
+
   const { data: sessionData } = await supabase.auth.getSession();
   const token = sessionData?.session?.access_token;
+  const userId = sessionData?.session?.user?.id;
 
-  if (!token) {
+  if (!token || !userId) {
     throw new Error("Authentication required");
   }
 
+  // 1️⃣ CHECK SUBSCRIPTION
+  const subscription = await getUserSubscription(userId);
+  const limit = getContractLimit(subscription.plan);
+
+  // 2️⃣ CHECK USAGE
+  const month = new Date().toISOString().slice(0, 7);
+
+  const { data: usage } = await supabase
+    .from("contract_usage")
+    .select("used")
+    .eq("user_id", userId)
+    .eq("month", month)
+    .single();
+
+  if (usage && usage.used >= limit) {
+    throw new Error("Monthly contract limit reached. Upgrade to Pro.");
+  }
+
+  // 3️⃣ GENERATE CONTRACT
   let memoryContext = "";
-  // Add memory context if enabled
   if (params.useMemory) {
-    const context = await buildMemoryContext(params.clientName, params.contractType);
-    if (context) {
-      memoryContext = context;
-    }
+    memoryContext = (await buildMemoryContext(params.clientName, params.contractType)) || "";
   }
 
   const response = await fetch(
@@ -34,59 +52,21 @@ export async function generateContract(params: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({
-        contractType: params.contractType,
-        clientName: params.clientName,
-        freelancerName: params.freelancerName,
-        projectScope: params.projectScope,
-        budget: params.budget,
-        timeline: params.timeline,
-        memoryContext,
-      }),
+      body: JSON.stringify({ ...params, memoryContext }),
     }
   );
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Failed to generate contract: ${error}`);
+    throw new Error(await response.text());
   }
+
+  // 4️⃣ INCREMENT USAGE
+  await supabase.from("contract_usage").upsert({
+    user_id: userId,
+    month,
+    used: (usage?.used || 0) + 1,
+  });
 
   const data = await response.json();
   return data.contract;
-}
-
-// Extract and save memory from a generated contract
-export async function extractAndSaveMemory(
-  contractContent: string,
-  clientName: string,
-  contractType: string
-): Promise<void> {
-  try {
-    const { data: sessionData } = await supabase.auth.getSession();
-    const token = sessionData?.session?.access_token;
-
-    if (!token) return;
-
-    const response = await fetch(
-      `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/extract-contract-memory`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          contractContent,
-          clientName,
-          contractType,
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      console.error("Failed to extract contract memory");
-    }
-  } catch (error) {
-    console.error("Error extracting contract memory:", error);
-  }
 }
