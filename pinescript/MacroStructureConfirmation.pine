@@ -1,0 +1,770 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © MacroStructureConfirmation — Backup Confirmation Indicator for 180s Crypto Options
+// Designed for BTC/ETH on 15s/30s charts with HTF confirmation
+// NOT an entry signal generator — this is a market-state compass and trade-quality filter
+
+//@version=6
+indicator("Macro Structure Confirmation [180s Options]", shorttitle="MSC", overlay=true, max_labels_count=50, max_lines_count=20, max_boxes_count=20)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 1: INPUTS & CONFIGURATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- General Settings ---
+grpGeneral     = "═══ General Settings ═══"
+i_htfTF        = input.timeframe("3",   "HTF Timeframe",                  group=grpGeneral, tooltip="Higher timeframe for directional bias. Default 3m for 30s chart.")
+i_showTable    = input.bool(true,        "Show Dashboard Table",           group=grpGeneral)
+i_tablePos     = input.string("Top Right", "Table Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right", "Middle Left"], group=grpGeneral)
+i_showBgTint   = input.bool(true,        "Background Tint by State",      group=grpGeneral)
+i_bgAlpha      = input.int(92,           "Background Tint Transparency",  minval=80, maxval=98, group=grpGeneral)
+i_showRibbon   = input.bool(true,        "Show HTF Bias Ribbon",          group=grpGeneral)
+i_showLabels   = input.bool(true,        "Show State Change Labels",      group=grpGeneral)
+
+// --- HTF Bias Settings ---
+grpHTF         = "═══ HTF Bias & Strength ═══"
+i_htfFastLen   = input.int(8,            "HTF Fast EMA Length",           minval=3, maxval=30, group=grpHTF)
+i_htfSlowLen   = input.int(21,           "HTF Slow EMA Length",           minval=10, maxval=60, group=grpHTF)
+i_htfStrThr    = input.float(0.3,        "HTF Strength Threshold (ATR units)", minval=0.05, maxval=2.0, step=0.05, group=grpHTF, tooltip="Minimum EMA gap in ATR units to consider HTF trend 'strong'.")
+i_htfAtrLen    = input.int(14,           "HTF ATR Length",                minval=5, maxval=50, group=grpHTF)
+
+// --- Regime / Chop Detection ---
+grpRegime      = "═══ Regime Detection ═══"
+i_adxLen       = input.int(10,           "ADX Length",                    minval=5, maxval=30, group=grpRegime)
+i_adxTrend     = input.float(18.0,       "ADX Trend Threshold",          minval=10.0, maxval=40.0, step=1.0, group=grpRegime, tooltip="Above this = trending. Below = chop.")
+i_adxStrong    = input.float(28.0,       "ADX Strong Trend Threshold",   minval=15.0, maxval=50.0, step=1.0, group=grpRegime)
+i_effRatioLen  = input.int(10,           "Efficiency Ratio Length",       minval=5, maxval=30, group=grpRegime, tooltip="Measures directional efficiency. High = trending, Low = chop.")
+i_effRatioThr  = input.float(0.35,       "Efficiency Ratio Chop Threshold", minval=0.1, maxval=0.7, step=0.05, group=grpRegime)
+i_atrCompLen   = input.int(20,           "ATR Compression Lookback",     minval=10, maxval=50, group=grpRegime)
+i_atrCompRatio = input.float(0.7,        "ATR Compression Ratio",        minval=0.3, maxval=1.0, step=0.05, group=grpRegime, tooltip="Current ATR / Rolling ATR max. Below this = compressed.")
+
+// --- Structure / Pullback ---
+grpStruct      = "═══ Structure & Pullback ═══"
+i_microEmaLen  = input.int(5,            "Micro EMA Length",              minval=3, maxval=15, group=grpStruct)
+i_midEmaLen    = input.int(13,           "Mid EMA Length",                minval=8, maxval=30, group=grpStruct)
+i_macroEmaLen  = input.int(34,           "Macro EMA Length",              minval=20, maxval=60, group=grpStruct)
+i_stackAtrMult = input.float(0.15,       "EMA Stack Min Separation (ATR)", minval=0.02, maxval=0.5, step=0.02, group=grpStruct, tooltip="Minimum gap between EMAs in ATR units for clean stack.")
+i_pbDepthMax   = input.float(1.5,        "Max Pullback Depth (ATR units)", minval=0.3, maxval=3.0, step=0.1, group=grpStruct, tooltip="Pullback beyond this is structure break, not pullback.")
+
+// --- Exhaustion / Mean-Reversion Risk ---
+grpExhaust     = "═══ Exhaustion Detection ═══"
+i_extThresh    = input.float(1.8,        "Extension Threshold (ATR units)", minval=0.5, maxval=4.0, step=0.1, group=grpExhaust, tooltip="Distance from mid-EMA in ATR units to flag overextension.")
+i_extSevere    = input.float(2.8,        "Severe Extension (ATR units)",  minval=1.5, maxval=5.0, step=0.1, group=grpExhaust)
+i_wickRatio    = input.float(0.6,        "Wick Imbalance Ratio",          minval=0.3, maxval=0.9, step=0.05, group=grpExhaust, tooltip="If wick > this fraction of candle range, signals rejection.")
+i_rocExtLen    = input.int(6,            "ROC Extreme Lookback",          minval=3, maxval=15, group=grpExhaust)
+i_rocExtThr    = input.float(0.4,        "ROC Extreme Threshold (%)",     minval=0.1, maxval=2.0, step=0.05, group=grpExhaust, tooltip="Percent move over lookback that flags burst exhaustion.")
+
+// --- Volatility Regime ---
+grpVol         = "═══ Volatility Regime ═══"
+i_volAtrLen    = input.int(14,           "Volatility ATR Length",         minval=5, maxval=30, group=grpVol)
+i_volSmaLen    = input.int(50,           "Volatility SMA Lookback",      minval=20, maxval=100, group=grpVol)
+i_volLowMult   = input.float(0.65,       "Low Vol Multiplier",           minval=0.3, maxval=0.9, step=0.05, group=grpVol, tooltip="ATR below SMA*this = LOW volatility.")
+i_volHighMult  = input.float(1.5,        "High Vol Multiplier",          minval=1.1, maxval=3.0, step=0.1, group=grpVol, tooltip="ATR above SMA*this = HIGH volatility.")
+
+// --- Session / Time Quality ---
+grpSession     = "═══ Session & Time Quality ═══"
+i_sessEnable   = input.bool(true,        "Enable Session Scoring",        group=grpSession)
+i_sessTimezone = input.string("America/New_York", "Session Timezone", options=["America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Asia/Tokyo", "Asia/Hong_Kong", "Asia/Singapore", "Asia/Kolkata", "Australia/Sydney", "UTC"], group=grpSession)
+i_sessBoost    = input.float(10.0,       "Active Session Score Boost",   minval=0.0, maxval=30.0, step=1.0, group=grpSession)
+i_sessPenalty  = input.float(15.0,       "Dead Zone Score Penalty",      minval=0.0, maxval=30.0, step=1.0, group=grpSession)
+
+// --- Order Flow Proxy ---
+grpOF          = "═══ Order Flow Proxy ═══"
+i_ofEnable     = input.bool(true,        "Enable Volume Flow Proxy",      group=grpOF)
+i_ofLen        = input.int(14,           "Volume Flow Smoothing Length",  minval=5, maxval=30, group=grpOF)
+i_ofThresh     = input.float(0.3,        "Volume Flow Imbalance Threshold", minval=0.1, maxval=0.8, step=0.05, group=grpOF, tooltip="Normalized flow above this confirms directional pressure.")
+
+// --- Scoring Weights ---
+grpWeights     = "═══ Scoring Weights ═══"
+i_wHTF         = input.float(30.0,       "HTF Bias Weight",              minval=0.0, maxval=50.0, step=1.0, group=grpWeights)
+i_wRegime      = input.float(20.0,       "Regime Quality Weight",        minval=0.0, maxval=50.0, step=1.0, group=grpWeights)
+i_wStruct      = input.float(20.0,       "Structure Weight",             minval=0.0, maxval=50.0, step=1.0, group=grpWeights)
+i_wExhaust     = input.float(15.0,       "Exhaustion Penalty Weight",    minval=0.0, maxval=50.0, step=1.0, group=grpWeights)
+i_wSession     = input.float(8.0,        "Session Quality Weight",       minval=0.0, maxval=30.0, step=1.0, group=grpWeights)
+i_wOF          = input.float(7.0,        "Order Flow Weight",            minval=0.0, maxval=30.0, step=1.0, group=grpWeights)
+
+// --- Consensus Thresholds ---
+grpConsensus   = "═══ Consensus Thresholds ═══"
+i_strongThr    = input.float(65.0,       "Strong Bias Threshold",        minval=40.0, maxval=90.0, step=1.0, group=grpConsensus)
+i_weakThr      = input.float(40.0,       "Weak Bias Threshold",          minval=20.0, maxval=70.0, step=1.0, group=grpConsensus)
+i_standDownThr = input.float(25.0,       "Stand Down Threshold",         minval=10.0, maxval=50.0, step=1.0, group=grpConsensus, tooltip="Below this absolute score = Stand Down.")
+i_chopScoreThr = input.float(15.0,       "Chop Score Threshold",         minval=5.0, maxval=40.0, step=1.0, group=grpConsensus, tooltip="Absolute score below this in chop regime = Neutral/Chop.")
+
+// --- Test Mode ---
+grpTest        = "═══ Test Mode ═══"
+i_testMode     = input.bool(false,       "Enable Test Mode (Relaxed Thresholds)", group=grpTest, tooltip="Relaxes thresholds so states change more often. For verification only.")
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 2: HELPER FUNCTIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Clamp a value between min and max ---
+f_clamp(float val, float lo, float hi) =>
+    math.max(lo, math.min(hi, val))
+
+// --- Normalize a value to 0–1 range given min/max ---
+f_norm01(float val, float lo, float hi) =>
+    hi == lo ? 0.5 : f_clamp((val - lo) / (hi - lo), 0.0, 1.0)
+
+// --- Safe division ---
+f_safeDiv(float num, float den) =>
+    den == 0.0 ? 0.0 : num / den
+
+// --- Table position helper ---
+f_tablePos(string pos) =>
+    switch pos
+        "Top Right"     => position.top_right
+        "Top Left"      => position.top_left
+        "Bottom Right"  => position.bottom_right
+        "Bottom Left"   => position.bottom_left
+        "Middle Right"  => position.middle_right
+        "Middle Left"   => position.middle_left
+        => position.top_right
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 3: HTF BIAS & STRENGTH ENGINE
+// ══════════════════════════════════════════════════════════════════════════════
+// Pulls higher-timeframe EMA cross and ATR-normalized gap to determine
+// macro directional bias. Uses barmerge.lookahead_off for non-repainting.
+
+// HTF data via request.security — confirmed bars only (no lookahead)
+htfFastEma = request.security(syminfo.tickerid, i_htfTF, ta.ema(close, i_htfFastLen), lookahead=barmerge.lookahead_off)
+htfSlowEma = request.security(syminfo.tickerid, i_htfTF, ta.ema(close, i_htfSlowLen), lookahead=barmerge.lookahead_off)
+htfAtr     = request.security(syminfo.tickerid, i_htfTF, ta.atr(i_htfAtrLen),         lookahead=barmerge.lookahead_off)
+htfClose   = request.security(syminfo.tickerid, i_htfTF, close,                        lookahead=barmerge.lookahead_off)
+
+// HTF EMA gap normalized by HTF ATR
+float htfGapRaw  = htfFastEma - htfSlowEma
+float htfGapNorm = f_safeDiv(htfGapRaw, htfAtr)
+
+// HTF directional bias: +1 bull, -1 bear, 0 neutral
+float htfBiasRaw = htfGapNorm
+int   htfDir     = htfGapNorm > i_htfStrThr ? 1 : htfGapNorm < -i_htfStrThr ? -1 : 0
+
+// HTF strength score: 0–1 (how strong is the HTF trend)
+float htfStrength = f_norm01(math.abs(htfGapNorm), 0.0, i_htfStrThr * 4.0)
+
+// HTF slope (is the fast EMA accelerating or decelerating?)
+float htfFastSlope = htfFastEma - nz(htfFastEma[1])
+float htfSlopeNorm = f_safeDiv(htfFastSlope, htfAtr)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 4: REGIME / CHOP DETECTION ENGINE
+// ══════════════════════════════════════════════════════════════════════════════
+// Combines ADX, Efficiency Ratio, and ATR compression to classify
+// the current market as TRENDING, CHOPPY, or COMPRESSED.
+
+// --- ADX / DMI ---
+// Pine v6 ta.dmi returns [plus, minus, adx]
+[diPlus, diMinus, adxVal] = ta.dmi(i_adxLen, i_adxLen)
+
+// Apply test mode relaxation
+float effectiveAdxTrend  = i_testMode ? i_adxTrend * 0.7  : i_adxTrend
+float effectiveAdxStrong = i_testMode ? i_adxStrong * 0.7  : i_adxStrong
+
+bool isAdxTrending = adxVal > effectiveAdxTrend
+bool isAdxStrong   = adxVal > effectiveAdxStrong
+
+// --- Efficiency Ratio (Kaufman-style) ---
+// Direction / Volatility — high = trending, low = chop
+float erDirection  = math.abs(close - close[i_effRatioLen])
+float erVolatility = math.sum(math.abs(close - close[1]), i_effRatioLen)
+float effRatio     = f_safeDiv(erDirection, erVolatility)
+
+float effectiveEffThr = i_testMode ? i_effRatioThr * 0.7 : i_effRatioThr
+bool isEfficient      = effRatio > effectiveEffThr
+
+// --- ATR Compression Detection ---
+float ltfAtr       = ta.atr(i_volAtrLen)
+float atrRollingHi = ta.highest(ltfAtr, i_atrCompLen)
+float atrCompRatio = f_safeDiv(ltfAtr, atrRollingHi)
+bool isCompressed  = atrCompRatio < i_atrCompRatio
+
+// --- Combined Regime Score ---
+// 0 = pure chop, 1 = strong trend
+float regimeScore = 0.0
+regimeScore += isAdxTrending ? (isAdxStrong ? 0.45 : 0.25) : 0.0
+regimeScore += isEfficient ? 0.35 : 0.0
+regimeScore += isCompressed ? -0.15 : 0.1
+regimeScore += f_norm01(adxVal, 10.0, 40.0) * 0.1
+regimeScore := f_clamp(regimeScore, 0.0, 1.0)
+
+// Regime classification
+string regimeState = "CHOP"
+if regimeScore > 0.6
+    regimeState := "STRONG_TREND"
+else if regimeScore > 0.35
+    regimeState := "TREND"
+else if isCompressed
+    regimeState := "COMPRESSION"
+else
+    regimeState := "CHOP"
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 5: STRUCTURE / PULLBACK LOGIC
+// ══════════════════════════════════════════════════════════════════════════════
+// Uses a 3-EMA stack (micro/mid/macro) to detect clean trends,
+// pullbacks within trend, and structure breaks.
+
+float emaMicro = ta.ema(close, i_microEmaLen)
+float emaMid   = ta.ema(close, i_midEmaLen)
+float emaMacro = ta.ema(close, i_macroEmaLen)
+
+// EMA stack direction
+bool bullStack = emaMicro > emaMid and emaMid > emaMacro
+bool bearStack = emaMicro < emaMid and emaMid < emaMacro
+
+// EMA separations in ATR units
+float sepMicroMid  = f_safeDiv(math.abs(emaMicro - emaMid), ltfAtr)
+float sepMidMacro  = f_safeDiv(math.abs(emaMid - emaMacro), ltfAtr)
+bool isCleanStack  = sepMicroMid > i_stackAtrMult and sepMidMacro > i_stackAtrMult
+
+// Pullback detection: price between micro and mid EMA
+bool bullPullback = close < emaMicro and close > emaMid and emaMid > emaMacro
+bool bearPullback = close > emaMicro and close < emaMid and emaMid < emaMacro
+
+// Pullback depth in ATR units
+float pbDepth = f_safeDiv(math.abs(close - emaMicro), ltfAtr)
+bool isPullbackValid = pbDepth < i_pbDepthMax
+
+// Structure break: price crosses macro EMA against stack
+bool bullStructBreak = close < emaMacro and bullStack[1]
+bool bearStructBreak = close > emaMacro and bearStack[1]
+
+// EMA slope (mid EMA direction)
+float midSlope     = emaMid - emaMid[3]
+float midSlopeNorm = f_safeDiv(midSlope, ltfAtr)
+
+// Structure score: -1 (bearish) to +1 (bullish)
+float structScore = 0.0
+if bullStack and isCleanStack
+    structScore := 0.7 + (isPullbackValid and bullPullback ? 0.15 : 0.0)
+else if bearStack and isCleanStack
+    structScore := -0.7 - (isPullbackValid and bearPullback ? 0.15 : 0.0)
+else if bullPullback and isPullbackValid
+    structScore := 0.35
+else if bearPullback and isPullbackValid
+    structScore := -0.35
+else if bullStructBreak
+    structScore := -0.5
+else if bearStructBreak
+    structScore := 0.5
+else
+    structScore := midSlopeNorm * 0.3
+
+structScore := f_clamp(structScore, -1.0, 1.0)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 6: EXHAUSTION / MEAN-REVERSION RISK
+// ══════════════════════════════════════════════════════════════════════════════
+// Detects overextension from mean, wick rejection patterns,
+// and burst ROC extremes to flag exhaustion risk.
+
+// --- Price extension from mid-EMA in ATR units ---
+float extFromMean    = f_safeDiv(close - emaMid, ltfAtr)
+float absExtFromMean = math.abs(extFromMean)
+
+float effectiveExtThr    = i_testMode ? i_extThresh * 0.7 : i_extThresh
+float effectiveExtSevere = i_testMode ? i_extSevere * 0.7 : i_extSevere
+
+bool isExtended       = absExtFromMean > effectiveExtThr
+bool isSevereExtended = absExtFromMean > effectiveExtSevere
+
+// --- Wick imbalance (rejection candle detection) ---
+float candleRange = high - low
+float upperWick   = high - math.max(open, close)
+float lowerWick   = math.min(open, close) - low
+float maxWick     = math.max(upperWick, lowerWick)
+float wickRatio   = candleRange > 0 ? maxWick / candleRange : 0.0
+bool hasWickReject = wickRatio > i_wickRatio
+
+// Direction of wick rejection
+bool topWickReject    = upperWick > lowerWick and hasWickReject
+bool bottomWickReject = lowerWick > upperWick and hasWickReject
+
+// --- Burst ROC extreme ---
+float rocBurst    = f_safeDiv(close - close[i_rocExtLen], close[i_rocExtLen]) * 100.0
+float absRocBurst = math.abs(rocBurst)
+
+float effectiveRocThr = i_testMode ? i_rocExtThr * 0.6 : i_rocExtThr
+bool isRocExtreme     = absRocBurst > effectiveRocThr
+
+// --- Volatility spike after directional push ---
+float atrSma       = ta.sma(ltfAtr, i_volSmaLen)
+float volSpike     = f_safeDiv(ltfAtr, atrSma)
+bool isVolSpike    = volSpike > 1.8
+
+// --- Combined exhaustion score: 0 (no risk) to 1 (extreme risk) ---
+float exhaustScore = 0.0
+exhaustScore += isExtended ? (isSevereExtended ? 0.4 : 0.25) : 0.0
+exhaustScore += hasWickReject ? 0.2 : 0.0
+exhaustScore += isRocExtreme ? 0.25 : 0.0
+exhaustScore += (isVolSpike and isExtended) ? 0.15 : 0.0
+exhaustScore := f_clamp(exhaustScore, 0.0, 1.0)
+
+bool exhaustionRisk = exhaustScore > 0.35
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 7: SESSION / TIME QUALITY SCORING
+// ══════════════════════════════════════════════════════════════════════════════
+// Scores the current session for crypto trading quality.
+// Active sessions (London/NY overlap, Asian open) get boosted.
+// Dead zones get penalized.
+
+float sessionScore = 50.0  // baseline
+
+if i_sessEnable
+    int hrNY = hour(time, i_sessTimezone)
+
+    // London session: 08:00–16:00 local (mapped to NY: varies, but we use the user's chosen TZ)
+    // NY session: 09:30–16:00 NY
+    // Asia session: 20:00–04:00 NY (roughly)
+    // For crypto, best action: 08:00–11:00 and 14:00–17:00 in chosen TZ
+
+    bool isActiveHigh = (hrNY >= 8 and hrNY < 11) or (hrNY >= 14 and hrNY < 17)
+    bool isActiveMed  = (hrNY >= 11 and hrNY < 14) or (hrNY >= 17 and hrNY < 20)
+    bool isDeadZone   = (hrNY >= 0 and hrNY < 4) or (hrNY >= 22 and hrNY <= 23)
+
+    if isActiveHigh
+        sessionScore += i_sessBoost
+    else if isActiveMed
+        sessionScore += i_sessBoost * 0.4
+    else if isDeadZone
+        sessionScore -= i_sessPenalty
+    else
+        sessionScore -= i_sessPenalty * 0.3
+
+sessionScore := f_clamp(sessionScore, 0.0, 100.0)
+float sessionNorm = sessionScore / 100.0
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 8: VOLATILITY REGIME CLASSIFICATION
+// ══════════════════════════════════════════════════════════════════════════════
+// Classifies current volatility as LOW / NORMAL / HIGH based on
+// ATR relative to its longer-term average.
+
+float volRatio = f_safeDiv(ltfAtr, atrSma)
+
+string volRegime = "NORMAL"
+if volRatio < i_volLowMult
+    volRegime := "LOW"
+else if volRatio > i_volHighMult
+    volRegime := "HIGH"
+
+bool isLowVol  = volRegime == "LOW"
+bool isHighVol = volRegime == "HIGH"
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 9: ORDER FLOW PROXY (SIGNED VOLUME)
+// ══════════════════════════════════════════════════════════════════════════════
+// Uses close-to-close direction * volume as a proxy for order flow.
+// Normalized to -1..+1 range. Confirms or contradicts directional bias.
+
+float signedVol    = (close >= close[1] ? 1.0 : -1.0) * volume
+float svSmooth     = ta.ema(signedVol, i_ofLen)
+float svAbsSmooth  = ta.ema(math.abs(signedVol), i_ofLen)
+float flowNorm     = f_safeDiv(svSmooth, svAbsSmooth)  // -1 to +1
+
+bool flowBullish   = i_ofEnable and flowNorm > i_ofThresh
+bool flowBearish   = i_ofEnable and flowNorm < -i_ofThresh
+bool flowConflict  = false
+
+if i_ofEnable
+    if htfDir == 1 and flowNorm < -i_ofThresh * 0.5
+        flowConflict := true
+    if htfDir == -1 and flowNorm > i_ofThresh * 0.5
+        flowConflict := true
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 10: MASTER CONFIRMATION SCORE ENGINE
+// ══════════════════════════════════════════════════════════════════════════════
+// Combines all sub-scores into a single directional confidence score.
+// Positive = bullish bias, Negative = bearish bias.
+// Magnitude = confidence strength (0–100 scale).
+
+// Normalize weights to sum to 100
+float totalWeight = i_wHTF + i_wRegime + i_wStruct + i_wExhaust + i_wSession + i_wOF
+float nwHTF     = f_safeDiv(i_wHTF, totalWeight)
+float nwRegime  = f_safeDiv(i_wRegime, totalWeight)
+float nwStruct  = f_safeDiv(i_wStruct, totalWeight)
+float nwExhaust = f_safeDiv(i_wExhaust, totalWeight)
+float nwSession = f_safeDiv(i_wSession, totalWeight)
+float nwOF      = f_safeDiv(i_wOF, totalWeight)
+
+// HTF component: -1 to +1 scaled by strength
+float compHTF = htfGapNorm > 0 ? htfStrength : -htfStrength
+compHTF := f_clamp(compHTF, -1.0, 1.0)
+
+// Regime component: 0 to 1 (quality multiplier, not directional)
+float compRegime = regimeScore
+
+// Structure component: -1 to +1
+float compStruct = structScore
+
+// Exhaustion component: 0 to -1 (always a penalty)
+float compExhaust = -exhaustScore
+
+// Session component: 0 to 1
+float compSession = sessionNorm
+
+// Order flow component: -1 to +1
+float compOF = i_ofEnable ? flowNorm : 0.0
+
+// --- Directional raw score ---
+// HTF, Structure, and OF contribute direction
+// Regime and Session are quality multipliers
+// Exhaustion is a penalty
+float dirRaw = compHTF * nwHTF + compStruct * nwStruct + compOF * nwOF
+float qualityMult = (compRegime * nwRegime + compSession * nwSession) / math.max(nwRegime + nwSession, 0.01)
+float exhaustPenalty = compExhaust * nwExhaust
+
+// Final score: directional * quality + exhaustion penalty
+// Scale to -100..+100
+float rawScore = (dirRaw * (0.5 + qualityMult * 0.5) + exhaustPenalty) * 100.0
+float finalScore = f_clamp(rawScore * 1.8, -100.0, 100.0)  // amplify for usability
+
+// Separate CALL and PUT confidence (0–100)
+float callConf = finalScore > 0 ? math.abs(finalScore) : 0.0
+float putConf  = finalScore < 0 ? math.abs(finalScore) : 0.0
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 11: MARKET STATE CLASSIFICATION
+// ══════════════════════════════════════════════════════════════════════════════
+// Classifies the market into one of several structural states
+// based on the combined analysis above.
+
+string marketState = "Compression / Chop"
+
+if exhaustionRisk and isExtended
+    if extFromMean > 0
+        marketState := "Exhaustion Up"
+    else
+        marketState := "Exhaustion Down"
+else if isSevereExtended
+    marketState := "Reversal Risk Elevated"
+else if regimeState == "STRONG_TREND" or regimeState == "TREND"
+    if bullStack and isCleanStack
+        if bullPullback and isPullbackValid
+            marketState := "Trend Pullback Up"
+        else
+            marketState := "Trend Expansion Up"
+    else if bearStack and isCleanStack
+        if bearPullback and isPullbackValid
+            marketState := "Trend Pullback Down"
+        else
+            marketState := "Trend Expansion Down"
+    else if structScore > 0.2
+        marketState := "Trend Expansion Up"
+    else if structScore < -0.2
+        marketState := "Trend Expansion Down"
+    else
+        marketState := "Weak Trend"
+else if isCompressed
+    marketState := "Compression / Squeeze"
+else
+    marketState := "Compression / Chop"
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 12: BIGGER-PICTURE BIAS CLASSIFICATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+float absScore = math.abs(finalScore)
+
+// Apply test mode relaxation to thresholds
+float effectiveStrongThr    = i_testMode ? i_strongThr * 0.6 : i_strongThr
+float effectiveWeakThr      = i_testMode ? i_weakThr * 0.6   : i_weakThr
+float effectiveStandDownThr = i_testMode ? i_standDownThr * 1.5 : i_standDownThr
+float effectiveChopThr      = i_testMode ? i_chopScoreThr * 1.5 : i_chopScoreThr
+
+string bigPictureBias = "Neutral / Chop"
+
+bool isStandDown = false
+
+// Stand Down conditions
+if isLowVol and regimeState == "CHOP"
+    isStandDown := true
+else if exhaustScore > 0.6 and regimeState == "CHOP"
+    isStandDown := true
+else if absScore < effectiveStandDownThr and regimeState == "CHOP"
+    isStandDown := true
+
+if isStandDown
+    bigPictureBias := "STAND DOWN"
+else if finalScore > effectiveStrongThr
+    bigPictureBias := "Strong Call Bias"
+else if finalScore > effectiveWeakThr
+    bigPictureBias := "Weak Call Bias"
+else if finalScore < -effectiveStrongThr
+    bigPictureBias := "Strong Put Bias"
+else if finalScore < -effectiveWeakThr
+    bigPictureBias := "Weak Put Bias"
+else if regimeState == "CHOP" or regimeState == "COMPRESSION"
+    bigPictureBias := "Neutral / Chop"
+else
+    bigPictureBias := "Neutral / Chop"
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 13: RISK FLAGS
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool flagChopRisk       = regimeState == "CHOP" and not isStandDown
+bool flagLateMove       = isExtended and not isSevereExtended
+bool flagExhaustion     = exhaustionRisk
+bool flagLowVol         = isLowVol
+bool flagDirConflict    = (htfDir == 1 and structScore < -0.2) or (htfDir == -1 and structScore > 0.2)
+bool flagFlowConflict   = flowConflict
+
+string riskFlagsStr = ""
+if flagChopRisk
+    riskFlagsStr += "CHOP "
+if flagLateMove
+    riskFlagsStr += "LATE "
+if flagExhaustion
+    riskFlagsStr += "EXHAUST "
+if flagLowVol
+    riskFlagsStr += "LOWVOL "
+if flagDirConflict
+    riskFlagsStr += "CONFLICT "
+if flagFlowConflict
+    riskFlagsStr += "FLOWX "
+
+if riskFlagsStr == ""
+    riskFlagsStr := "NONE"
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 14: CONSENSUS MODE OUTPUT
+// ══════════════════════════════════════════════════════════════════════════════
+// Simplifies everything into one actionable line.
+
+string consensus = "WAIT"
+
+if isStandDown
+    consensus := "STAND DOWN"
+else if bigPictureBias == "Strong Call Bias" and not flagExhaustion and not flagDirConflict
+    consensus := "CALL OK"
+else if bigPictureBias == "Strong Put Bias" and not flagExhaustion and not flagDirConflict
+    consensus := "PUT OK"
+else if (bigPictureBias == "Weak Call Bias" or bigPictureBias == "Weak Put Bias") and not flagChopRisk
+    consensus := "WAIT"
+else
+    consensus := "WAIT"
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 15: VISUALS — HTF BIAS RIBBON
+// ══════════════════════════════════════════════════════════════════════════════
+// Plots a ribbon between HTF fast and slow EMAs projected onto the LTF chart.
+
+color ribbonBullColor = color.new(color.teal, 75)
+color ribbonBearColor = color.new(color.red, 75)
+color ribbonNeutColor = color.new(color.gray, 85)
+
+color ribbonColor = htfDir == 1 ? ribbonBullColor : htfDir == -1 ? ribbonBearColor : ribbonNeutColor
+
+p_htfFast = plot(i_showRibbon ? htfFastEma : na, "HTF Fast EMA", color=color.new(color.teal, 60), linewidth=1)
+p_htfSlow = plot(i_showRibbon ? htfSlowEma : na, "HTF Slow EMA", color=color.new(color.orange, 60), linewidth=1)
+fill(p_htfFast, p_htfSlow, color=i_showRibbon ? ribbonColor : na, title="HTF Bias Ribbon")
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 16: VISUALS — BACKGROUND TINT
+// ══════════════════════════════════════════════════════════════════════════════
+
+color bgColor = na
+if i_showBgTint
+    if consensus == "CALL OK"
+        bgColor := color.new(color.green, i_bgAlpha)
+    else if consensus == "PUT OK"
+        bgColor := color.new(color.red, i_bgAlpha)
+    else if consensus == "STAND DOWN"
+        bgColor := color.new(color.orange, i_bgAlpha - 3)
+    else if bigPictureBias == "Weak Call Bias"
+        bgColor := color.new(color.green, i_bgAlpha + 3)
+    else if bigPictureBias == "Weak Put Bias"
+        bgColor := color.new(color.red, i_bgAlpha + 3)
+    else
+        bgColor := na
+
+bgcolor(bgColor, title="State Background Tint")
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 17: VISUALS — STATE CHANGE LABELS
+// ══════════════════════════════════════════════════════════════════════════════
+// Only prints labels on state transitions to avoid clutter.
+
+string prevConsensus = nz(consensus[1], "WAIT")
+bool consensusChanged = consensus != prevConsensus
+
+if i_showLabels and consensusChanged
+    color lblColor = switch consensus
+        "CALL OK"    => color.green
+        "PUT OK"     => color.red
+        "STAND DOWN" => color.orange
+        => color.gray
+
+    label.new(bar_index, high + ltfAtr * 0.5, consensus, style=label.style_label_down, color=lblColor, textcolor=color.white, size=size.small)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 18: VISUALS — RISK FLAG MARKERS
+// ══════════════════════════════════════════════════════════════════════════════
+// Small markers below bars when risk flags are active (transition only).
+
+bool prevExhaust = nz(flagExhaustion[1], false)
+bool prevConflict = nz(flagDirConflict[1], false)
+
+if i_showLabels and flagExhaustion and not prevExhaust
+    label.new(bar_index, low - ltfAtr * 0.5, "⚠ EXHAUST", style=label.style_label_up, color=color.new(color.orange, 20), textcolor=color.white, size=size.tiny)
+
+if i_showLabels and flagDirConflict and not prevConflict
+    label.new(bar_index, low - ltfAtr * 0.8, "⚠ CONFLICT", style=label.style_label_up, color=color.new(color.purple, 20), textcolor=color.white, size=size.tiny)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 19: VISUALS — DASHBOARD TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+if i_showTable and barstate.islast
+    var table dash = table.new(f_tablePos(i_tablePos), 2, 14, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.new(color.gray, 60), frame_width=2, frame_color=color.new(color.gray, 40))
+
+    // --- Row colors ---
+    color consensusColor = switch consensus
+        "CALL OK"    => color.green
+        "PUT OK"     => color.red
+        "STAND DOWN" => color.orange
+        => color.gray
+
+    color biasColor = switch bigPictureBias
+        "Strong Call Bias" => color.green
+        "Weak Call Bias"   => color.new(color.green, 40)
+        "Strong Put Bias"  => color.red
+        "Weak Put Bias"    => color.new(color.red, 40)
+        "STAND DOWN"       => color.orange
+        => color.gray
+
+    color stateColor = color.gray
+    if str.contains(marketState, "Up")
+        stateColor := color.teal
+    else if str.contains(marketState, "Down")
+        stateColor := color.maroon
+    else if str.contains(marketState, "Exhaust") or str.contains(marketState, "Reversal")
+        stateColor := color.orange
+
+    color regimeColor = switch regimeState
+        "STRONG_TREND" => color.teal
+        "TREND"        => color.new(color.teal, 40)
+        "COMPRESSION"  => color.new(color.yellow, 40)
+        => color.new(color.red, 40)
+
+    color volColor = switch volRegime
+        "LOW"  => color.new(color.yellow, 30)
+        "HIGH" => color.new(color.orange, 30)
+        => color.new(color.teal, 50)
+
+    color htfColor = htfDir == 1 ? color.green : htfDir == -1 ? color.red : color.gray
+
+    color riskColor = riskFlagsStr == "NONE" ? color.new(color.green, 40) : color.new(color.orange, 20)
+
+    // --- Header ---
+    table.cell(dash, 0, 0, "MSC Dashboard", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 40))
+    table.cell(dash, 1, 0, "180s Options", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.blue, 40))
+
+    // Row 1: Consensus
+    table.cell(dash, 0, 1, "CONSENSUS", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 1, consensus, text_color=color.white, text_size=size.normal, bgcolor=consensusColor)
+
+    // Row 2: Bigger Picture Bias
+    table.cell(dash, 0, 2, "Bias", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 2, bigPictureBias, text_color=color.white, text_size=size.small, bgcolor=biasColor)
+
+    // Row 3: Score
+    string scoreStr = (finalScore >= 0 ? "+" : "") + str.tostring(finalScore, "#.0")
+    color scoreColor = finalScore > 30 ? color.green : finalScore < -30 ? color.red : color.gray
+    table.cell(dash, 0, 3, "Score", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 3, scoreStr, text_color=color.white, text_size=size.small, bgcolor=scoreColor)
+
+    // Row 4: CALL / PUT Confidence
+    table.cell(dash, 0, 4, "CALL / PUT", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 4, str.tostring(callConf, "#.0") + " / " + str.tostring(putConf, "#.0"), text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 50))
+
+    // Row 5: Market State
+    table.cell(dash, 0, 5, "State", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 5, marketState, text_color=color.white, text_size=size.tiny, bgcolor=stateColor)
+
+    // Row 6: Regime
+    table.cell(dash, 0, 6, "Regime", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 6, regimeState, text_color=color.white, text_size=size.tiny, bgcolor=regimeColor)
+
+    // Row 7: HTF Bias
+    string htfStr = htfDir == 1 ? "BULL" : htfDir == -1 ? "BEAR" : "FLAT"
+    table.cell(dash, 0, 7, "HTF (" + i_htfTF + ")", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 7, htfStr + " (" + str.tostring(htfStrength * 100, "#.0") + "%)", text_color=color.white, text_size=size.tiny, bgcolor=htfColor)
+
+    // Row 8: Volatility
+    table.cell(dash, 0, 8, "Volatility", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 8, volRegime, text_color=color.white, text_size=size.tiny, bgcolor=volColor)
+
+    // Row 9: Exhaustion
+    string exhStr = str.tostring(exhaustScore * 100, "#.0") + "%"
+    color exhColor = exhaustScore > 0.5 ? color.red : exhaustScore > 0.25 ? color.orange : color.new(color.green, 40)
+    table.cell(dash, 0, 9, "Exhaust", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 9, exhStr, text_color=color.white, text_size=size.tiny, bgcolor=exhColor)
+
+    // Row 10: Flow
+    string flowStr = i_ofEnable ? str.tostring(flowNorm, "#.##") : "OFF"
+    color flowColor = flowBullish ? color.green : flowBearish ? color.red : color.gray
+    table.cell(dash, 0, 10, "Flow", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 10, flowStr, text_color=color.white, text_size=size.tiny, bgcolor=i_ofEnable ? flowColor : color.gray)
+
+    // Row 11: Session
+    string sessStr = str.tostring(sessionScore, "#.0")
+    color sessColor = sessionScore > 55 ? color.new(color.green, 40) : sessionScore < 40 ? color.new(color.red, 40) : color.gray
+    table.cell(dash, 0, 11, "Session", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 11, sessStr, text_color=color.white, text_size=size.tiny, bgcolor=sessColor)
+
+    // Row 12: Risk Flags
+    table.cell(dash, 0, 12, "Risks", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 12, riskFlagsStr, text_color=color.white, text_size=size.tiny, bgcolor=riskColor)
+
+    // Row 13: Efficiency Ratio
+    table.cell(dash, 0, 13, "Eff.Ratio", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 13, str.tostring(effRatio, "#.##"), text_color=color.white, text_size=size.tiny, bgcolor=effRatio > i_effRatioThr ? color.new(color.teal, 50) : color.new(color.red, 50))
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 20: PLOT OUTPUTS (for external use / alerts)
+// ══════════════════════════════════════════════════════════════════════════════
+
+plot(finalScore, "Directional Score", color=color.new(color.blue, 100), display=display.data_window)
+plot(callConf,   "CALL Confidence",   color=color.new(color.green, 100), display=display.data_window)
+plot(putConf,    "PUT Confidence",    color=color.new(color.red, 100), display=display.data_window)
+plot(regimeScore * 100, "Regime Score", color=color.new(color.gray, 100), display=display.data_window)
+plot(exhaustScore * 100, "Exhaustion Score", color=color.new(color.orange, 100), display=display.data_window)
+plot(sessionScore, "Session Score", color=color.new(color.purple, 100), display=display.data_window)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  SECTION 21: ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(consensus == "CALL OK" and consensus[1] != "CALL OK", "CALL OK Triggered", "MSC: CALL OK — Strong bullish confirmation active")
+alertcondition(consensus == "PUT OK" and consensus[1] != "PUT OK", "PUT OK Triggered", "MSC: PUT OK — Strong bearish confirmation active")
+alertcondition(consensus == "STAND DOWN" and consensus[1] != "STAND DOWN", "STAND DOWN Triggered", "MSC: STAND DOWN — Market conditions unfavorable")
+alertcondition(flagExhaustion and not flagExhaustion[1], "Exhaustion Risk", "MSC: Exhaustion risk detected — avoid new entries")
+alertcondition(flagDirConflict and not flagDirConflict[1], "Direction Conflict", "MSC: HTF vs LTF direction conflict detected")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██  END OF INDICATOR
+// ══════════════════════════════════════════════════════════════════════════════
