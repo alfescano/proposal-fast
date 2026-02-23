@@ -1,0 +1,634 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BACKUP STRATEGY: Market Structure Compass v1.0
+// Pine Script v6 | Strategy (overlay=true)
+// ═══════════════════════════════════════════════════════════════════════════════
+// PURPOSE:
+//   This is a BACKUP / CONFIRMATION strategy for manual 180-second crypto
+//   options trading (CALL/PUT) on myrockitcoin.com.
+//   It does NOT generate entry signals like a primary indicator.
+//   Instead, it classifies market STATE, REGIME, STRUCTURE, and RISK
+//   to help you decide whether to TRUST or REJECT signals from your
+//   primary entry indicator.
+//
+// DESIGN PHILOSOPHY:
+//   - Macro / structure-aware (not breakout/impulse based)
+//   - Market state engine with regime detection
+//   - HTF directional bias with strength scoring
+//   - Exhaustion / mean-reversion risk detection
+//   - Session quality awareness
+//   - Volatility regime classification
+//   - Order-flow proxy via signed volume
+//   - Composite confirmation score
+//
+// STRATEGY TRADES:
+//   strategy.entry calls simulate CALL/PUT validation trades.
+//   They are NOT direct broker execution signals.
+//   They exist so you can backtest signal quality in TradingView.
+//   Real trading = manual click on myrockitcoin.com after confirmation.
+//
+// NON-REPAINTING GUARANTEE:
+//   - All HTF data uses barmerge.lookahead_off
+//   - All logic is bar-close only (no intrabar recalculation tricks)
+//   - No future data references
+// ═══════════════════════════════════════════════════════════════════════════════
+
+//@version=6
+strategy("Backup: Market Structure Compass v1.0", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.0, slippage=0, calc_on_every_tick=false, process_orders_on_close=true)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 1: INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// --- General ---
+grp_gen = "General Settings"
+i_chartTF       = input.string("30", "Chart Timeframe (for bar calc)", options=["15","30"], group=grp_gen, tooltip="Select your chart timeframe so the strategy can calculate the correct holding period in bars for 180s expiry.")
+i_holdBars      = input.int(6, "Hold Bars Override (0=auto)", minval=0, maxval=50, group=grp_gen, tooltip="Override auto-calculated hold bars. 0 = auto (6 for 30s, 12 for 15s).")
+i_cooldownBars  = input.int(3, "Cooldown Between Trades (bars)", minval=0, maxval=20, group=grp_gen)
+i_testMode      = input.bool(false, "Test Mode (relaxed thresholds)", group=grp_gen, tooltip="Enable to lower thresholds so states and trades trigger more often during verification.")
+
+// --- HTF Bias ---
+grp_htf = "HTF Bias + Strength"
+i_htfTF         = input.timeframe("3", "HTF Timeframe", group=grp_htf, tooltip="Higher timeframe for directional bias. Default 3m for 30s chart.")
+i_htfFastLen    = input.int(8, "HTF Fast EMA Length", minval=2, maxval=50, group=grp_htf)
+i_htfSlowLen    = input.int(21, "HTF Slow EMA Length", minval=5, maxval=100, group=grp_htf)
+i_htfStrThr     = input.float(0.3, "HTF Strength Threshold (ATR units)", minval=0.05, maxval=2.0, step=0.05, group=grp_htf, tooltip="Minimum EMA spread in ATR units to consider HTF bias 'strong'.")
+
+// --- Regime / Chop Detection ---
+grp_reg = "Regime Detection"
+i_adxLen        = input.int(10, "ADX Length", minval=5, maxval=30, group=grp_reg)
+i_adxTrendThr   = input.float(20.0, "ADX Trend Threshold", minval=10.0, maxval=40.0, step=1.0, group=grp_reg, tooltip="ADX above this = trending. Below = chop.")
+i_effRatioLen   = input.int(10, "Efficiency Ratio Length", minval=5, maxval=30, group=grp_reg, tooltip="Kaufman-style efficiency ratio lookback.")
+i_effRatioThr   = input.float(0.4, "Efficiency Ratio Trend Threshold", minval=0.1, maxval=0.8, step=0.05, group=grp_reg)
+
+// --- Structure / Pullback ---
+grp_str = "Structure + Pullback"
+i_microEmaLen   = input.int(5, "Micro EMA Length", minval=2, maxval=15, group=grp_str)
+i_shortEmaLen   = input.int(9, "Short EMA Length", minval=3, maxval=20, group=grp_str)
+i_medEmaLen     = input.int(21, "Medium EMA Length", minval=10, maxval=50, group=grp_str)
+i_pbDepthATR    = input.float(0.5, "Pullback Depth Threshold (ATR)", minval=0.1, maxval=2.0, step=0.1, group=grp_str, tooltip="Distance from micro EMA in ATR units to classify as pullback.")
+i_extendATR     = input.float(1.5, "Overextension Threshold (ATR)", minval=0.5, maxval=4.0, step=0.1, group=grp_str, tooltip="Distance from medium EMA in ATR units to flag overextension.")
+
+// --- Exhaustion / Mean-Reversion Risk ---
+grp_exh = "Exhaustion Detection"
+i_exhROCLen     = input.int(3, "Exhaustion ROC Length", minval=1, maxval=10, group=grp_exh)
+i_exhROCThr     = input.float(0.4, "Exhaustion ROC Threshold (%)", minval=0.1, maxval=2.0, step=0.05, group=grp_exh, tooltip="Short-burst ROC above this % flags exhaustion risk.")
+i_wickRatio     = input.float(0.6, "Wick/Body Imbalance Ratio", minval=0.3, maxval=1.5, step=0.1, group=grp_exh, tooltip="If upper or lower wick > this * body, flag wick imbalance.")
+i_volSpikeLen   = input.int(20, "Vol Spike Lookback", minval=5, maxval=50, group=grp_exh)
+i_volSpikeMult  = input.float(1.8, "Vol Spike Multiplier", minval=1.2, maxval=3.0, step=0.1, group=grp_exh)
+
+// --- Session / Time Quality ---
+grp_ses = "Session Quality"
+i_sesEnable     = input.bool(true, "Enable Session Scoring", group=grp_ses)
+i_tzOffset      = input.int(0, "UTC Offset (hours)", minval=-12, maxval=14, group=grp_ses, tooltip="Your timezone offset from UTC for session detection.")
+i_asiaScore     = input.int(40, "Asia Session Score (0-100)", minval=0, maxval=100, group=grp_ses)
+i_londonScore   = input.int(80, "London Session Score (0-100)", minval=0, maxval=100, group=grp_ses)
+i_nyScore       = input.int(90, "NY Session Score (0-100)", minval=0, maxval=100, group=grp_ses)
+i_otherScore    = input.int(30, "Other/Off-Hours Score (0-100)", minval=0, maxval=100, group=grp_ses)
+
+// --- Volatility Regime ---
+grp_vol = "Volatility Regime"
+i_atrLen        = input.int(14, "ATR Length", minval=5, maxval=50, group=grp_vol)
+i_volLookback   = input.int(50, "Volatility Percentile Lookback", minval=20, maxval=200, group=grp_vol)
+i_volLowPct     = input.float(25.0, "Low Vol Percentile", minval=5.0, maxval=45.0, step=5.0, group=grp_vol)
+i_volHighPct    = input.float(75.0, "High Vol Percentile", minval=55.0, maxval=95.0, step=5.0, group=grp_vol)
+
+// --- Order Flow Proxy ---
+grp_of = "Order Flow Proxy"
+i_ofEnable      = input.bool(true, "Enable Signed Volume Proxy", group=grp_of)
+i_ofLen         = input.int(10, "Signed Volume Smoothing Length", minval=3, maxval=30, group=grp_of)
+i_ofThreshold   = input.float(0.3, "OF Imbalance Threshold (normalized)", minval=0.1, maxval=0.8, step=0.05, group=grp_of)
+
+// --- Confirmation Score Weights ---
+grp_wt = "Score Weights"
+i_wHtf          = input.float(30.0, "HTF Bias Weight", minval=0, maxval=100, step=5, group=grp_wt)
+i_wRegime       = input.float(20.0, "Regime Quality Weight", minval=0, maxval=100, step=5, group=grp_wt)
+i_wStructure    = input.float(20.0, "Structure Weight", minval=0, maxval=100, step=5, group=grp_wt)
+i_wExhaust      = input.float(15.0, "Exhaustion Penalty Weight", minval=0, maxval=100, step=5, group=grp_wt)
+i_wSession      = input.float(10.0, "Session Quality Weight", minval=0, maxval=100, step=5, group=grp_wt)
+i_wOF           = input.float(5.0, "Order Flow Weight", minval=0, maxval=100, step=5, group=grp_wt)
+
+// --- Entry Thresholds ---
+grp_entry = "Entry Thresholds"
+i_strongThr     = input.float(65.0, "Strong Bias Threshold", minval=40, maxval=90, step=5, group=grp_entry)
+i_weakThr       = input.float(45.0, "Weak Bias Threshold", minval=20, maxval=70, step=5, group=grp_entry)
+i_standDownThr  = input.float(25.0, "Stand Down Threshold", minval=10, maxval=50, step=5, group=grp_entry)
+
+// --- Visual Settings ---
+grp_vis = "Visuals"
+i_showTable     = input.bool(true, "Show Dashboard Table", group=grp_vis)
+i_showBgTint    = input.bool(true, "Show Background Tint", group=grp_vis)
+i_showLabels    = input.bool(true, "Show State Change Labels", group=grp_vis)
+i_showRibbon    = input.bool(true, "Show HTF Bias Ribbon", group=grp_vis)
+i_tablePos      = input.string("Top Right", "Table Position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=grp_vis)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 2: CORE CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// --- Holding period calculation ---
+autoHoldBars = i_chartTF == "15" ? 12 : 6
+holdBars = i_holdBars > 0 ? i_holdBars : autoHoldBars
+
+// --- Test mode adjustments ---
+testAdj = i_testMode ? 0.7 : 1.0
+adxTrendThr_adj   = i_adxTrendThr * testAdj
+effRatioThr_adj   = i_effRatioThr * testAdj
+strongThr_adj     = i_strongThr * testAdj
+weakThr_adj       = i_weakThr * testAdj
+exhROCThr_adj     = i_exhROCThr * (i_testMode ? 1.4 : 1.0)
+extendATR_adj     = i_extendATR * (i_testMode ? 1.3 : 1.0)
+
+// --- ATR (used everywhere) ---
+atrVal = ta.atr(i_atrLen)
+atrSafe = atrVal > 0 ? atrVal : 0.0001
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 3: HTF BIAS + STRENGTH
+// ═══════════════════════════════════════════════════════════════════════════════
+// Uses confirmed HTF EMA cross with strength measured in ATR units.
+// barmerge.lookahead_off ensures no future data leak.
+
+htfFastEma = request.security(syminfo.tickerid, i_htfTF, ta.ema(close, i_htfFastLen), lookahead=barmerge.lookahead_off)
+htfSlowEma = request.security(syminfo.tickerid, i_htfTF, ta.ema(close, i_htfSlowLen), lookahead=barmerge.lookahead_off)
+htfATR     = request.security(syminfo.tickerid, i_htfTF, ta.atr(i_atrLen), lookahead=barmerge.lookahead_off)
+
+htfATRSafe    = htfATR > 0 ? htfATR : 0.0001
+htfSpread     = htfFastEma - htfSlowEma
+htfSpreadNorm = htfSpread / htfATRSafe
+
+// HTF bias: +1 bull, -1 bear, 0 neutral
+htfBullish = htfSpreadNorm > i_htfStrThr
+htfBearish = htfSpreadNorm < -i_htfStrThr
+htfBias = htfBullish ? 1 : htfBearish ? -1 : 0
+
+// HTF strength: 0-1 normalized (capped at 3x threshold)
+htfStrengthRaw = math.abs(htfSpreadNorm) / (i_htfStrThr * 3.0)
+htfStrength = math.min(htfStrengthRaw, 1.0)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 4: REGIME / CHOP DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+// Combines ADX and Kaufman Efficiency Ratio for robust regime classification.
+// ADX measures trend strength; ER measures directional efficiency.
+
+// --- ADX Calculation ---
+// Pine v6 ta.dmi returns [diplus, diminus, adx]
+dmiPlus  = ta.dmi(i_adxLen, i_adxLen)[0]
+dmiMinus = ta.dmi(i_adxLen, i_adxLen)[1]
+adxVal   = ta.dmi(i_adxLen, i_adxLen)[2]
+
+// --- Efficiency Ratio (Kaufman-style) ---
+// Direction = abs(close - close[N]), Volatility = sum of abs(close - close[1]) over N
+erDirection = math.abs(close - close[i_effRatioLen])
+// Safe rolling sum using ta.sma * length
+erVolSma    = ta.sma(math.abs(close - close[1]), i_effRatioLen)
+erVolatility = erVolSma * i_effRatioLen
+erVolSafe   = erVolatility > 0 ? erVolatility : 0.0001
+effRatio    = erDirection / erVolSafe
+
+// --- Regime Classification ---
+// isTrending requires BOTH ADX and ER to agree
+adxTrending = adxVal > adxTrendThr_adj
+erTrending  = effRatio > effRatioThr_adj
+isTrending  = adxTrending and erTrending
+isChop      = not adxTrending and not erTrending
+isMixed     = not isTrending and not isChop
+
+// Regime score: 0 (chop) to 1 (strong trend)
+adxNorm = math.min(adxVal / 40.0, 1.0)
+erNorm  = math.min(effRatio / 0.8, 1.0)
+regimeScore = (adxNorm + erNorm) / 2.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 5: STRUCTURE / PULLBACK LOGIC
+// ═══════════════════════════════════════════════════════════════════════════════
+// EMA stack analysis: micro < short < medium = bearish stack, reverse = bullish.
+// Pullback = price deviates from micro EMA within a trend.
+// Overextension = price too far from medium EMA.
+
+microEma = ta.ema(close, i_microEmaLen)
+shortEma = ta.ema(close, i_shortEmaLen)
+medEma   = ta.ema(close, i_medEmaLen)
+
+// EMA stack direction
+bullStack = microEma > shortEma and shortEma > medEma
+bearStack = microEma < shortEma and shortEma < medEma
+
+// EMA slope (micro EMA change normalized by ATR)
+microSlope = (microEma - microEma[3]) / atrSafe
+
+// Distance from micro EMA in ATR units (for pullback detection)
+distFromMicro = (close - microEma) / atrSafe
+
+// Distance from medium EMA in ATR units (for overextension)
+distFromMed = (close - medEma) / atrSafe
+
+// Pullback detection: price pulled back from micro EMA in trending regime
+isPullbackBull = isTrending and htfBias >= 0 and bullStack and distFromMicro < -i_pbDepthATR
+isPullbackBear = isTrending and htfBias <= 0 and bearStack and distFromMicro > i_pbDepthATR
+
+// Overextension detection
+isOverextUp   = distFromMed > extendATR_adj
+isOverextDown = distFromMed < -extendATR_adj
+isOverextended = isOverextUp or isOverextDown
+
+// Structure score: -1 to +1
+structBullScore = bullStack ? 0.5 : 0.0
+structBearScore = bearStack ? -0.5 : 0.0
+slopeContrib    = math.max(math.min(microSlope * 0.5, 0.5), -0.5)
+structureRaw    = structBullScore + structBearScore + slopeContrib
+structureScore  = math.max(math.min(structureRaw, 1.0), -1.0)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 6: EXHAUSTION / MEAN-REVERSION RISK
+// ═══════════════════════════════════════════════════════════════════════════════
+// Detects when a move is "too late" to chase.
+// Uses: short-burst ROC, wick/body imbalance, volatility spike.
+
+// --- Short-burst ROC ---
+rocVal = ((close - close[i_exhROCLen]) / close[i_exhROCLen]) * 100.0
+rocAbs = math.abs(rocVal)
+isROCExtreme = rocAbs > exhROCThr_adj
+
+// --- Wick / Body Imbalance ---
+bodySize = math.abs(close - open)
+bodySafe = bodySize > 0 ? bodySize : 0.0001
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+maxWick = math.max(upperWick, lowerWick)
+isWickImbalance = maxWick > (i_wickRatio * bodySafe)
+
+// --- Volatility Spike (ATR spike after directional push) ---
+atrSma = ta.sma(atrVal, i_volSpikeLen)
+atrSmaSafe = atrSma > 0 ? atrSma : 0.0001
+isVolSpike = atrVal > (atrSmaSafe * i_volSpikeMult)
+
+// --- Combined Exhaustion Score (0 to 1, higher = more exhausted) ---
+exhCount = 0.0
+exhCount := exhCount + (isROCExtreme ? 0.35 : 0.0)
+exhCount := exhCount + (isWickImbalance ? 0.25 : 0.0)
+exhCount := exhCount + (isVolSpike ? 0.2 : 0.0)
+exhCount := exhCount + (isOverextended ? 0.2 : 0.0)
+exhaustionScore = math.min(exhCount, 1.0)
+
+isExhausted = exhaustionScore > 0.5
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 7: SESSION / TIME QUALITY
+// ═══════════════════════════════════════════════════════════════════════════════
+// Classifies current time into trading sessions and assigns quality score.
+// Sessions defined in UTC, adjusted by user timezone offset.
+
+hourUTC = hour(time, "UTC")
+hourLocal = (hourUTC + i_tzOffset + 24) % 24
+
+// Session detection (approximate standard hours in local time)
+// Asia: 00:00-08:00 UTC (adjust by offset)
+// London: 08:00-16:00 UTC
+// NY: 13:00-21:00 UTC
+// Overlap London/NY: 13:00-16:00 UTC
+isAsia   = hourLocal >= 0 and hourLocal < 8
+isLondon = hourLocal >= 8 and hourLocal < 16
+isNY     = hourLocal >= 13 and hourLocal < 21
+isOther  = not isAsia and not isLondon and not isNY
+
+// Session score (0-100)
+sessionScoreRaw = isNY ? i_nyScore : isLondon ? i_londonScore : isAsia ? i_asiaScore : i_otherScore
+sessionScore = i_sesEnable ? sessionScoreRaw : 70
+sessionNorm = sessionScore / 100.0
+
+// Session label
+sessionLabel = isNY ? "NY" : isLondon ? "LDN" : isAsia ? "ASIA" : "OTHER"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 8: VOLATILITY REGIME
+// ═══════════════════════════════════════════════════════════════════════════════
+// Classifies current ATR into LOW / NORMAL / HIGH using percentile rank.
+
+atrPctRank = ta.percentrank(atrVal, i_volLookback)
+
+isLowVol  = atrPctRank < i_volLowPct
+isHighVol = atrPctRank > i_volHighPct
+isNormVol = not isLowVol and not isHighVol
+
+// Volatility regime label
+volRegimeLabel = isLowVol ? "LOW" : isHighVol ? "HIGH" : "NORMAL"
+
+// Volatility quality score (0-1): normal is best, low is worst
+volQuality = isLowVol ? 0.2 : isHighVol ? 0.6 : 1.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 9: ORDER FLOW PROXY (Signed Volume)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Uses close-to-close direction * volume as a proxy for order flow.
+// Normalized and smoothed. Not a hard gate, just a confidence modifier.
+
+priceDir = close > close[1] ? 1.0 : close < close[1] ? -1.0 : 0.0
+signedVol = priceDir * volume
+signedVolSmooth = ta.ema(signedVol, i_ofLen)
+
+// Normalize against average volume
+avgVol = ta.sma(volume, i_ofLen)
+avgVolSafe = avgVol > 0 ? avgVol : 1.0
+ofNorm = signedVolSmooth / avgVolSafe
+
+// OF bias: positive = buying pressure, negative = selling pressure
+ofBullish = i_ofEnable and ofNorm > i_ofThreshold
+ofBearish = i_ofEnable and ofNorm < -i_ofThreshold
+ofScore = i_ofEnable ? math.max(math.min(ofNorm, 1.0), -1.0) : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 10: COMPOSITE CONFIRMATION SCORE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Weighted composite score: positive = CALL bias, negative = PUT bias.
+// Range approximately -100 to +100.
+
+// Normalize weights
+totalWeight = i_wHtf + i_wRegime + i_wStructure + i_wExhaust + i_wSession + i_wOF
+totalWeightSafe = totalWeight > 0 ? totalWeight : 1.0
+
+// Component scores (each -1 to +1 or 0 to 1)
+// HTF component: -1 to +1
+htfComponent = htfBias == 1 ? htfStrength : htfBias == -1 ? -htfStrength : 0.0
+
+// Regime component: 0 to 1 (non-directional, boosts confidence)
+regimeComponent = regimeScore
+
+// Structure component: -1 to +1
+structComponent = structureScore
+
+// Exhaustion component: 0 to -1 (always a penalty, reduces magnitude)
+exhComponent = -exhaustionScore
+
+// Session component: 0 to 1 (non-directional, boosts confidence)
+sesComponent = sessionNorm
+
+// OF component: -1 to +1
+ofComponent = ofScore
+
+// Directional components (contribute to direction)
+dirScore = (htfComponent * i_wHtf + structComponent * i_wStructure + ofComponent * i_wOF) / totalWeightSafe
+
+// Confidence components (modify magnitude)
+confScore = (regimeComponent * i_wRegime + sesComponent * i_wSession + exhComponent * i_wExhaust) / totalWeightSafe
+
+// Final composite: direction * confidence amplifier
+// Scale to -100 to +100
+compositeRaw = (dirScore + dirScore * confScore) * 100.0
+compositeScore = math.max(math.min(compositeRaw, 100.0), -100.0)
+
+// Absolute confidence
+absScore = math.abs(compositeScore)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 11: BIAS CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+isStrongCall = compositeScore > strongThr_adj
+isWeakCall   = compositeScore > weakThr_adj and not isStrongCall
+isStrongPut  = compositeScore < -strongThr_adj
+isWeakPut    = compositeScore < -weakThr_adj and not isStrongPut
+isNeutral    = not isStrongCall and not isWeakCall and not isStrongPut and not isWeakPut
+
+// Stand Down conditions
+standDownLowVol   = isLowVol and absScore < 50.0
+standDownExhaust  = isExhausted and absScore < 70.0
+standDownChop     = isChop and absScore < 50.0
+isStandDown       = standDownLowVol or standDownExhaust or standDownChop
+
+// Bias label
+biasLabel = isStandDown ? "STAND DOWN" : isStrongCall ? "STRONG CALL" : isWeakCall ? "WEAK CALL" : isStrongPut ? "STRONG PUT" : isWeakPut ? "WEAK PUT" : "NEUTRAL"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 12: MARKET STATE CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Determine market state string
+isTrendExpUp    = isTrending and htfBias == 1 and bullStack and not isOverextended
+isTrendExpDown  = isTrending and htfBias == -1 and bearStack and not isOverextended
+isTrendPBUp     = isTrending and htfBias >= 0 and isPullbackBull
+isTrendPBDown   = isTrending and htfBias <= 0 and isPullbackBear
+isCompression   = isChop and not isOverextended and not isExhausted
+isExhaustState  = isExhausted or isOverextended
+isReversalRisk  = isExhausted and isOverextended
+
+stateLabel = isReversalRisk ? "REVERSAL RISK" : isExhaustState ? "EXHAUSTION" : isTrendExpUp ? "TREND EXP UP" : isTrendExpDown ? "TREND EXP DOWN" : isTrendPBUp ? "TREND PB UP" : isTrendPBDown ? "TREND PB DOWN" : isCompression ? "COMPRESSION" : isMixed ? "MIXED/TRANSITION" : "CHOP"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 13: RISK FLAGS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+flagChop       = isChop
+flagExtended   = isOverextended
+flagLowVol     = isLowVol
+flagExhaustion = isExhausted
+flagConflict   = (htfBias == 1 and structureScore < -0.2) or (htfBias == -1 and structureScore > 0.2)
+
+riskFlagCount = 0
+riskFlagCount := riskFlagCount + (flagChop ? 1 : 0)
+riskFlagCount := riskFlagCount + (flagExtended ? 1 : 0)
+riskFlagCount := riskFlagCount + (flagLowVol ? 1 : 0)
+riskFlagCount := riskFlagCount + (flagExhaustion ? 1 : 0)
+riskFlagCount := riskFlagCount + (flagConflict ? 1 : 0)
+
+// Build risk flags string
+riskStr = ""
+riskStr := riskStr + (flagChop ? "CHOP " : "")
+riskStr := riskStr + (flagExtended ? "EXTENDED " : "")
+riskStr := riskStr + (flagLowVol ? "LOW VOL " : "")
+riskStr := riskStr + (flagExhaustion ? "EXHAUST " : "")
+riskStr := riskStr + (flagConflict ? "CONFLICT " : "")
+riskStr := riskStr == "" ? "NONE" : riskStr
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 14: CONSENSUS MODE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Simplified one-line output: CALL OK / PUT OK / WAIT / STAND DOWN
+
+consensusLabel = isStandDown ? "STAND DOWN" : isStrongCall ? "CALL OK" : isStrongPut ? "PUT OK" : (isWeakCall or isWeakPut) ? "WAIT" : "WAIT"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 15: STRATEGY ENTRIES / EXITS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Strategy trades simulate CALL/PUT validation.
+// They are NOT direct broker execution signals.
+// Long = CALL validation, Short = PUT validation.
+// Holding period = fixed bars (180s equivalent).
+
+// Track bars since last trade for cooldown
+var int barsSinceExit = 100
+barsSinceExit := barsSinceExit + 1
+
+// Entry conditions
+canTrade = barsSinceExit >= i_cooldownBars and not isStandDown
+callEntry = canTrade and isStrongCall and isTrending and not isExhausted
+putEntry  = canTrade and isStrongPut and isTrending and not isExhausted
+
+// Track entry bar for time-based exit
+var int entryBar = 0
+
+// Entries
+if callEntry and strategy.position_size == 0
+    strategy.entry("CALL_SIM", strategy.long, comment="CALL SIM")
+    entryBar := bar_index
+    barsSinceExit := 0
+
+if putEntry and strategy.position_size == 0
+    strategy.entry("PUT_SIM", strategy.short, comment="PUT SIM")
+    entryBar := bar_index
+    barsSinceExit := 0
+
+// Time-based exit (fixed holding period)
+barsHeld = bar_index - entryBar
+shouldExit = strategy.position_size != 0 and barsHeld >= holdBars
+
+if shouldExit and strategy.position_size > 0
+    strategy.close("CALL_SIM", comment="EXPIRY")
+    barsSinceExit := 0
+
+if shouldExit and strategy.position_size < 0
+    strategy.close("PUT_SIM", comment="EXPIRY")
+    barsSinceExit := 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 16: VISUALS - BACKGROUND TINT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+bgCallStrong = color.new(color.green, 85)
+bgCallWeak   = color.new(color.green, 93)
+bgPutStrong  = color.new(color.red, 85)
+bgPutWeak    = color.new(color.red, 93)
+bgChop       = color.new(color.yellow, 93)
+bgStandDown  = color.new(color.gray, 90)
+bgNone       = color.new(color.black, 100)
+
+bgColor = isStandDown ? bgStandDown : isStrongCall ? bgCallStrong : isWeakCall ? bgCallWeak : isStrongPut ? bgPutStrong : isWeakPut ? bgPutWeak : isChop ? bgChop : bgNone
+
+bgcolor(i_showBgTint ? bgColor : na, title="State Background")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 17: VISUALS - HTF BIAS RIBBON
+// ═══════════════════════════════════════════════════════════════════════════════
+
+htfFastPlot = plot(i_showRibbon ? htfFastEma : na, "HTF Fast EMA", color=color.new(color.blue, 60), linewidth=1)
+htfSlowPlot = plot(i_showRibbon ? htfSlowEma : na, "HTF Slow EMA", color=color.new(color.orange, 60), linewidth=1)
+ribbonColorFill = htfFastEma > htfSlowEma ? color.new(color.green, 90) : color.new(color.red, 90)
+fill(htfFastPlot, htfSlowPlot, color=i_showRibbon ? ribbonColorFill : na, title="HTF Ribbon Fill")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 18: VISUALS - STATE CHANGE LABELS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Only show labels on state transitions to avoid clutter.
+
+var string prevBias = "NEUTRAL"
+biasChanged = biasLabel != prevBias
+prevBias := biasLabel
+
+var string prevState = "CHOP"
+stateChanged = stateLabel != prevState
+prevState := stateLabel
+
+if i_showLabels and biasChanged
+    labelColor = isStrongCall ? color.green : isStrongPut ? color.red : isWeakCall ? color.lime : isWeakPut ? color.maroon : isStandDown ? color.gray : color.yellow
+    labelYPos  = isStrongCall or isWeakCall ? low : high
+    labelStyle = isStrongCall or isWeakCall ? label.style_label_up : label.style_label_down
+    label.new(bar_index, labelYPos, biasLabel, color=labelColor, textcolor=color.white, size=size.tiny, style=labelStyle)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 19: VISUALS - DASHBOARD TABLE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+tablePosition = i_tablePos == "Top Right" ? position.top_right : i_tablePos == "Top Left" ? position.top_left : i_tablePos == "Bottom Right" ? position.bottom_right : position.bottom_left
+
+var table dash = table.new(tablePosition, 2, 14, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.new(color.gray, 60), frame_width=1, frame_color=color.new(color.gray, 40))
+
+if i_showTable and barstate.islast
+    // Colors
+    biasColor = isStrongCall ? color.green : isStrongPut ? color.red : isWeakCall ? color.lime : isWeakPut ? color.maroon : isStandDown ? color.gray : color.yellow
+    stateColor = isTrendExpUp or isTrendPBUp ? color.green : isTrendExpDown or isTrendPBDown ? color.red : isCompression or isChop ? color.yellow : color.orange
+    regimeColor = isTrending ? color.green : isChop ? color.red : color.yellow
+    volColor = isLowVol ? color.orange : isHighVol ? color.purple : color.green
+    consColor = consensusLabel == "CALL OK" ? color.green : consensusLabel == "PUT OK" ? color.red : consensusLabel == "STAND DOWN" ? color.gray : color.yellow
+    riskColor = riskFlagCount == 0 ? color.green : riskFlagCount <= 2 ? color.yellow : color.red
+    scoreColor = compositeScore > 0 ? color.green : compositeScore < 0 ? color.red : color.gray
+
+    // Header
+    table.cell(dash, 0, 0, "STRUCTURE COMPASS", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 40))
+    table.cell(dash, 1, 0, "v1.0", text_color=color.gray, text_size=size.tiny, bgcolor=color.new(color.blue, 40))
+
+    // Consensus
+    table.cell(dash, 0, 1, "CONSENSUS", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 1, consensusLabel, text_color=color.white, text_size=size.normal, bgcolor=color.new(consColor, 30))
+
+    // Bias
+    table.cell(dash, 0, 2, "BIAS", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 2, biasLabel, text_color=color.white, text_size=size.small, bgcolor=color.new(biasColor, 40))
+
+    // Score
+    scoreStr = str.tostring(compositeScore, "#.0")
+    table.cell(dash, 0, 3, "SCORE", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 3, scoreStr, text_color=color.white, text_size=size.small, bgcolor=color.new(scoreColor, 40))
+
+    // Market State
+    table.cell(dash, 0, 4, "STATE", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 4, stateLabel, text_color=color.white, text_size=size.small, bgcolor=color.new(stateColor, 40))
+
+    // Regime
+    regimeStr = isTrending ? "TRENDING" : isChop ? "CHOP" : "MIXED"
+    table.cell(dash, 0, 5, "REGIME", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 5, regimeStr, text_color=color.white, text_size=size.small, bgcolor=color.new(regimeColor, 40))
+
+    // HTF Bias
+    htfStr = htfBias == 1 ? "BULL (" + str.tostring(htfStrength * 100, "#") + "%)" : htfBias == -1 ? "BEAR (" + str.tostring(htfStrength * 100, "#") + "%)" : "FLAT"
+    htfColor = htfBias == 1 ? color.green : htfBias == -1 ? color.red : color.gray
+    table.cell(dash, 0, 6, "HTF BIAS", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 6, htfStr, text_color=color.white, text_size=size.small, bgcolor=color.new(htfColor, 40))
+
+    // Volatility
+    table.cell(dash, 0, 7, "VOLATILITY", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 7, volRegimeLabel, text_color=color.white, text_size=size.small, bgcolor=color.new(volColor, 40))
+
+    // Session
+    table.cell(dash, 0, 8, "SESSION", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 8, sessionLabel + " (" + str.tostring(sessionScore) + ")", text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 50))
+
+    // Exhaustion
+    exhStr = str.tostring(exhaustionScore * 100, "#") + "%"
+    exhColor = exhaustionScore > 0.5 ? color.red : exhaustionScore > 0.25 ? color.yellow : color.green
+    table.cell(dash, 0, 9, "EXHAUSTION", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 9, exhStr, text_color=color.white, text_size=size.small, bgcolor=color.new(exhColor, 40))
+
+    // Order Flow
+    ofStr = i_ofEnable ? str.tostring(ofNorm, "#.##") : "OFF"
+    ofColor = ofBullish ? color.green : ofBearish ? color.red : color.gray
+    table.cell(dash, 0, 10, "FLOW PROXY", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 10, ofStr, text_color=color.white, text_size=size.small, bgcolor=color.new(ofColor, 40))
+
+    // Risk Flags
+    table.cell(dash, 0, 11, "RISK FLAGS", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 11, riskStr, text_color=color.white, text_size=size.small, bgcolor=color.new(riskColor, 40))
+
+    // Position
+    posStr = strategy.position_size > 0 ? "LONG (CALL SIM)" : strategy.position_size < 0 ? "SHORT (PUT SIM)" : "FLAT"
+    posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(dash, 0, 12, "POSITION", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 12, posStr, text_color=color.white, text_size=size.small, bgcolor=color.new(posColor, 40))
+
+    // Hold Bars
+    holdStr = strategy.position_size != 0 ? str.tostring(barsHeld) + "/" + str.tostring(holdBars) : "—"
+    table.cell(dash, 0, 13, "HOLD BARS", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 13, holdStr, text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 50))
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 20: ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(isStrongCall and biasChanged, "Strong CALL Bias", "Structure Compass: STRONG CALL BIAS detected")
+alertcondition(isStrongPut and biasChanged, "Strong PUT Bias", "Structure Compass: STRONG PUT BIAS detected")
+alertcondition(isStandDown and biasChanged, "Stand Down", "Structure Compass: STAND DOWN — elevated risk")
+alertcondition(isExhausted, "Exhaustion Risk", "Structure Compass: EXHAUSTION RISK flagged")
+alertcondition(flagConflict, "Direction Conflict", "Structure Compass: LTF vs HTF DIRECTION CONFLICT")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// END OF STRATEGY
+// ═══════════════════════════════════════════════════════════════════════════════
