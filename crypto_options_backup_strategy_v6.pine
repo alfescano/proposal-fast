@@ -1,0 +1,503 @@
+//@version=6
+strategy("Crypto Options Backup Strategy - Market State Validator", 
+         shorttitle="Options Backup", 
+         overlay=true, 
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=100,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=2,
+         calc_on_every_tick=false,
+         calc_on_order_fills=false,
+         process_orders_on_close=true)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRATEGY DESIGN PHILOSOPHY
+// ═══════════════════════════════════════════════════════════════════════════════
+// This is NOT a direct entry signal generator like typical breakout/momentum scripts.
+// This is a MARKET STATE VALIDATION ENGINE designed to:
+// 1. Assess macro market structure and regime
+// 2. Detect chop, exhaustion, and trap conditions
+// 3. Provide confirmation/rejection for manual 180-second options trades
+// 4. Generate strategy entries/exits to simulate validation quality
+//
+// Strategy trades represent CALL/PUT validation signals, not broker execution.
+// Use this alongside your primary entry indicator as a confirmation layer.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUT PARAMETERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// === HTF Configuration ===
+htfTimeframe = input.timeframe("3", "HTF Timeframe", group="HTF Bias")
+htfFastLen = input.int(8, "HTF Fast EMA", minval=2, group="HTF Bias")
+htfSlowLen = input.int(21, "HTF Slow EMA", minval=5, group="HTF Bias")
+htfStrengthLen = input.int(14, "HTF Strength Period", minval=5, group="HTF Bias")
+
+// === Regime Detection ===
+adxLen = input.int(14, "ADX Length", minval=5, group="Regime Detection")
+adxTrendThreshold = input.float(25.0, "ADX Trend Threshold", minval=10, maxval=50, step=1, group="Regime Detection")
+adxStrongThreshold = input.float(35.0, "ADX Strong Threshold", minval=20, maxval=60, step=1, group="Regime Detection")
+rangeEffLen = input.int(20, "Range Efficiency Period", minval=10, group="Regime Detection")
+rangeEffThreshold = input.float(0.35, "Range Eff Chop Threshold", minval=0.1, maxval=0.6, step=0.05, group="Regime Detection")
+
+// === Structure & Pullback ===
+microEmaLen = input.int(5, "Micro EMA Length", minval=2, group="Structure")
+structureEmaLen = input.int(13, "Structure EMA Length", minval=5, group="Structure")
+pullbackDepthATR = input.float(1.5, "Pullback Depth (ATR)", minval=0.5, maxval=5, step=0.1, group="Structure")
+trendStackBars = input.int(3, "Trend Stack Confirmation Bars", minval=1, maxval=10, group="Structure")
+
+// === Exhaustion Detection ===
+exhaustionATRMult = input.float(2.5, "Exhaustion Distance (ATR)", minval=1.0, maxval=5.0, step=0.1, group="Exhaustion")
+rocExtremeLen = input.int(5, "ROC Extreme Length", minval=3, maxval=20, group="Exhaustion")
+rocExtremeThreshold = input.float(1.5, "ROC Extreme Threshold %", minval=0.5, maxval=5, step=0.1, group="Exhaustion")
+wickImbalanceThreshold = input.float(2.0, "Wick/Body Imbalance Ratio", minval=1.5, maxval=4, step=0.1, group="Exhaustion")
+
+// === Volatility Regimes ===
+atrLen = input.int(14, "ATR Length", minval=5, group="Volatility")
+volLowThreshold = input.float(0.5, "Low Vol Threshold (% of avg)", minval=0.2, maxval=0.8, step=0.05, group="Volatility")
+volHighThreshold = input.float(1.8, "High Vol Threshold (% of avg)", minval=1.2, maxval=3.0, step=0.1, group="Volatility")
+volAvgLen = input.int(50, "Vol Average Period", minval=20, group="Volatility")
+
+// === Session Quality ===
+enableSessionFilter = input.bool(true, "Enable Session Scoring", group="Session")
+sessionTimezone = input.string("America/New_York", "Timezone", group="Session")
+asiaScore = input.float(0.6, "Asia Session Score", minval=0, maxval=1, step=0.1, group="Session")
+londonScore = input.float(0.9, "London Session Score", minval=0, maxval=1, step=0.1, group="Session")
+nyScore = input.float(1.0, "NY Session Score", minval=0, maxval=1, step=0.1, group="Session")
+otherScore = input.float(0.5, "Other Session Score", minval=0, maxval=1, step=0.1, group="Session")
+
+// === Order Flow Proxy ===
+enableOrderFlow = input.bool(true, "Enable Order Flow Proxy", group="Order Flow")
+ofLen = input.int(10, "Order Flow Period", minval=5, maxval=30, group="Order Flow")
+ofThreshold = input.float(0.6, "Order Flow Alignment Threshold", minval=0.5, maxval=0.9, step=0.05, group="Order Flow")
+
+// === Strategy Behavior ===
+chartTF = input.string("30s", "Chart Timeframe (for hold calc)", options=["15s", "30s", "1m"], group="Strategy")
+holdBars = chartTF == "15s" ? 12 : chartTF == "30s" ? 6 : 3
+tradeCooldownBars = input.int(3, "Cooldown Between Trades (bars)", minval=0, maxval=20, group="Strategy")
+minConfidenceForEntry = input.float(65.0, "Min Confidence for Entry", minval=50, maxval=90, step=5, group="Strategy")
+
+// === Display ===
+showLabels = input.bool(true, "Show State Change Labels", group="Display")
+showDashboard = input.bool(true, "Show Dashboard", group="Display")
+showBgTint = input.bool(true, "Show Background Tint", group="Display")
+showHTFRibbon = input.bool(true, "Show HTF Bias Ribbon", group="Display")
+
+// === Test Mode ===
+testMode = input.bool(false, "Test Mode (More Frequent States)", group="Test Mode")
+testModeMultiplier = testMode ? 0.7 : 1.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CORE CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// === ATR and Volatility ===
+atrValue = ta.atr(atrLen)
+atrAvg = ta.sma(atrValue, volAvgLen)
+volRatio = atrValue / atrAvg
+volRegime = volRatio < volLowThreshold ? "LOW" : volRatio > volHighThreshold ? "HIGH" : "NORMAL"
+volRegimeScore = volRatio < volLowThreshold ? 0.3 : volRatio > volHighThreshold ? 0.7 : 1.0
+
+// === HTF Bias Calculation ===
+htfFastEMA = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, htfFastLen), lookahead=barmerge.lookahead_off)
+htfSlowEMA = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, htfSlowLen), lookahead=barmerge.lookahead_off)
+htfATR = request.security(syminfo.tickerid, htfTimeframe, ta.atr(atrLen), lookahead=barmerge.lookahead_off)
+
+htfBullish = htfFastEMA > htfSlowEMA
+htfBearish = htfFastEMA < htfSlowEMA
+htfDistance = math.abs(htfFastEMA - htfSlowEMA)
+htfStrength = htfATR > 0 ? (htfDistance / htfATR) * 100 : 0
+htfStrengthNorm = math.min(htfStrength / 2.0, 100)
+
+htfBias = htfBullish ? 1 : htfBearish ? -1 : 0
+htfBiasStrength = htfStrengthNorm
+
+// === ADX and DMI for Regime ===
+dmiLen = adxLen
+up = ta.change(high)
+down = -ta.change(low)
+plusDM = na(up) ? na : (up > down and up > 0 ? up : 0)
+minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+trur = ta.rma(ta.tr, dmiLen)
+plusDI = 100 * ta.rma(plusDM, dmiLen) / trur
+minusDI = 100 * ta.rma(minusDM, dmiLen) / trur
+dx = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx = ta.rma(dx, dmiLen)
+
+isTrending = adx > (adxTrendThreshold * testModeMultiplier)
+isStrongTrend = adx > (adxStrongThreshold * testModeMultiplier)
+isChopping = adx < (adxTrendThreshold * testModeMultiplier)
+
+// === Range Efficiency ===
+priceMove = math.abs(close - close[rangeEffLen])
+sumRange = math.sum(ta.tr, rangeEffLen)
+rangeEfficiency = sumRange > 0 ? priceMove / sumRange : 0
+isChopByRangeEff = rangeEfficiency < (rangeEffThreshold * testModeMultiplier)
+
+// === Combined Chop Detection ===
+chopDetected = isChopping or isChopByRangeEff
+
+// === Structure EMAs ===
+microEMA = ta.ema(close, microEmaLen)
+structureEMA = ta.ema(close, structureEmaLen)
+
+// === EMA Stack for Trend ===
+emaStackBull = close > microEMA and microEMA > structureEMA
+emaStackBear = close < microEMA and microEMA < structureEMA
+emaStackNeutral = not emaStackBull and not emaStackBear
+
+// Count consecutive stack bars
+var int bullStackCount = 0
+var int bearStackCount = 0
+
+if emaStackBull
+    bullStackCount := bullStackCount + 1
+    bearStackCount := 0
+else if emaStackBear
+    bearStackCount := bearStackCount + 1
+    bullStackCount := 0
+else
+    bullStackCount := 0
+    bearStackCount := 0
+
+trendStackConfirmed = bullStackCount >= trendStackBars or bearStackCount >= trendStackBars
+
+// === Pullback Detection ===
+distFromMicro = close - microEMA
+distFromMicroATR = atrValue > 0 ? distFromMicro / atrValue : 0
+isPullbackBull = htfBullish and distFromMicroATR < 0 and math.abs(distFromMicroATR) < pullbackDepthATR
+isPullbackBear = htfBearish and distFromMicroATR > 0 and math.abs(distFromMicroATR) < pullbackDepthATR
+
+// === Exhaustion Detection ===
+distFromStructure = close - structureEMA
+distFromStructureATR = atrValue > 0 ? math.abs(distFromStructure) / atrValue : 0
+isOverextended = distFromStructureATR > (exhaustionATRMult * testModeMultiplier)
+
+rocValue = ((close - close[rocExtremeLen]) / close[rocExtremeLen]) * 100
+isROCExtreme = math.abs(rocValue) > (rocExtremeThreshold * testModeMultiplier)
+
+bodySize = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+maxWick = math.max(upperWick, lowerWick)
+wickBodyRatio = bodySize > 0 ? maxWick / bodySize : 0
+hasWickImbalance = wickBodyRatio > wickImbalanceThreshold
+
+exhaustionDetected = isOverextended or (isROCExtreme and hasWickImbalance)
+
+// === Order Flow Proxy (Signed Volume) ===
+signedVol = close > close[1] ? volume : close < close[1] ? -volume : 0
+ofSum = math.sum(signedVol, ofLen)
+ofAbsSum = math.sum(math.abs(signedVol), ofLen)
+ofAlignment = ofAbsSum > 0 ? math.abs(ofSum) / ofAbsSum : 0
+ofBullish = ofSum > 0 and ofAlignment > ofThreshold
+ofBearish = ofSum < 0 and ofAlignment > ofThreshold
+ofNeutral = ofAlignment <= ofThreshold
+
+// === Session Detection ===
+currentHour = hour(time, sessionTimezone)
+isAsia = currentHour >= 0 and currentHour < 8
+isLondon = currentHour >= 8 and currentHour < 13
+isNY = currentHour >= 13 and currentHour < 20
+isOther = currentHour >= 20
+
+sessionQuality = isAsia ? asiaScore : isLondon ? londonScore : isNY ? nyScore : otherScore
+sessionQualityFinal = enableSessionFilter ? sessionQuality : 1.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MARKET STATE CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var string marketState = "Initializing"
+
+if chopDetected
+    marketState := "Compression / Chop"
+else if exhaustionDetected
+    marketState := "Exhaustion / Overextended"
+else if htfBullish and emaStackBull and trendStackConfirmed and not isPullbackBull
+    marketState := "Trend Expansion Up"
+else if htfBullish and isPullbackBull
+    marketState := "Trend Pullback Up"
+else if htfBearish and emaStackBear and trendStackConfirmed and not isPullbackBear
+    marketState := "Trend Expansion Down"
+else if htfBearish and isPullbackBear
+    marketState := "Trend Pullback Down"
+else if not isTrending
+    marketState := "Compression / Chop"
+else
+    marketState := "Reversal Risk Elevated"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONFIDENCE SCORING (0-100 for CALL and PUT separately)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Base scores
+callBaseScore = 0.0
+putBaseScore = 0.0
+
+// HTF contribution
+if htfBullish
+    callBaseScore += htfBiasStrength * 0.3
+else if htfBearish
+    putBaseScore += htfBiasStrength * 0.3
+
+// Structure contribution
+if emaStackBull and trendStackConfirmed
+    callBaseScore += 25.0
+else if emaStackBear and trendStackConfirmed
+    putBaseScore += 25.0
+
+// Trend strength contribution
+if isStrongTrend
+    if plusDI > minusDI
+        callBaseScore += 15.0
+    else
+        putBaseScore += 15.0
+else if isTrending
+    if plusDI > minusDI
+        callBaseScore += 10.0
+    else
+        putBaseScore += 10.0
+
+// Order flow contribution
+if enableOrderFlow
+    if ofBullish
+        callBaseScore += 10.0
+    else if ofBearish
+        putBaseScore += 10.0
+
+// Pullback bonus (good entry timing)
+if isPullbackBull
+    callBaseScore += 15.0
+else if isPullbackBear
+    putBaseScore += 15.0
+
+// Session quality multiplier
+callScoreWithSession = callBaseScore * sessionQualityFinal
+putScoreWithSession = putBaseScore * sessionQualityFinal
+
+// Volatility regime penalty
+callScoreWithVol = callScoreWithSession * volRegimeScore
+putScoreWithVol = putScoreWithSession * volRegimeScore
+
+// Chop penalty
+chopPenalty = chopDetected ? 0.4 : 1.0
+callScoreWithChop = callScoreWithVol * chopPenalty
+putScoreWithChop = putScoreWithVol * chopPenalty
+
+// Exhaustion penalty
+exhaustionPenalty = exhaustionDetected ? 0.5 : 1.0
+callConfidence = math.min(callScoreWithChop * exhaustionPenalty, 100)
+putConfidence = math.min(putScoreWithChop * exhaustionPenalty, 100)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BIAS CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var string biasState = "Neutral / Chop"
+
+if callConfidence >= 75
+    biasState := "Strong Call Bias"
+else if callConfidence >= 55
+    biasState := "Weak Call Bias"
+else if putConfidence >= 75
+    biasState := "Strong Put Bias"
+else if putConfidence >= 55
+    biasState := "Weak Put Bias"
+else
+    biasState := "Neutral / Chop"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RISK FLAGS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+riskChop = chopDetected
+riskLateMove = exhaustionDetected
+riskLowVol = volRegime == "LOW"
+riskExhaustion = isOverextended or isROCExtreme
+riskDirectionConflict = (htfBullish and emaStackBear) or (htfBearish and emaStackBull)
+
+standDown = riskChop or riskLowVol or (riskLateMove and riskExhaustion)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONSENSUS MODE OUTPUT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var string consensusMode = "WAIT"
+
+if standDown
+    consensusMode := "STAND DOWN"
+else if callConfidence >= minConfidenceForEntry and not riskDirectionConflict
+    consensusMode := "CALL OK"
+else if putConfidence >= minConfidenceForEntry and not riskDirectionConflict
+    consensusMode := "PUT OK"
+else
+    consensusMode := "WAIT"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRATEGY LOGIC (Simulates 180-second validation trades)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Track bars since last trade for cooldown
+var int barsSinceLastTrade = 999
+
+if strategy.position_size != 0
+    barsSinceLastTrade := 0
+else
+    barsSinceLastTrade += 1
+
+canTrade = barsSinceLastTrade >= tradeCooldownBars
+
+// Entry conditions (bar-close logic, non-repainting)
+longCondition = canTrade and consensusMode == "CALL OK" and callConfidence >= minConfidenceForEntry
+shortCondition = canTrade and consensusMode == "PUT OK" and putConfidence >= minConfidenceForEntry
+
+// Execute strategy entries
+if longCondition
+    strategy.entry("CALL_Validation", strategy.long, comment="CALL")
+
+if shortCondition
+    strategy.entry("PUT_Validation", strategy.short, comment="PUT")
+
+// Exit after fixed holding period (simulating 180-second expiry)
+if strategy.position_size > 0
+    strategy.close("CALL_Validation", when=ta.barssince(strategy.position_size > 0) >= holdBars - 1, comment="CALL_Exit")
+
+if strategy.position_size < 0
+    strategy.close("PUT_Validation", when=ta.barssince(strategy.position_size < 0) >= holdBars - 1, comment="PUT_Exit")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VISUALIZATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// === HTF Ribbon ===
+htfFastPlot = plot(showHTFRibbon ? htfFastEMA : na, "HTF Fast", color=color.new(color.blue, 70), linewidth=1)
+htfSlowPlot = plot(showHTFRibbon ? htfSlowEMA : na, "HTF Slow", color=color.new(color.orange, 70), linewidth=1)
+fill(htfFastPlot, htfSlowPlot, color=htfBullish ? color.new(color.green, 90) : color.new(color.red, 90))
+
+// === Background Tint ===
+bgColor = showBgTint ? (
+     marketState == "Trend Expansion Up" ? color.new(color.green, 95) :
+     marketState == "Trend Pullback Up" ? color.new(color.green, 97) :
+     marketState == "Trend Expansion Down" ? color.new(color.red, 95) :
+     marketState == "Trend Pullback Down" ? color.new(color.red, 97) :
+     marketState == "Compression / Chop" ? color.new(color.gray, 97) :
+     marketState == "Exhaustion / Overextended" ? color.new(color.orange, 96) :
+     color.new(color.yellow, 97)) : na
+
+bgcolor(bgColor)
+
+// === State Change Labels ===
+var string lastMarketState = ""
+stateChanged = marketState != lastMarketState
+
+if showLabels and stateChanged and barstate.isconfirmed
+    labelColor = marketState == "Trend Expansion Up" or marketState == "Trend Pullback Up" ? color.green :
+                 marketState == "Trend Expansion Down" or marketState == "Trend Pullback Down" ? color.red :
+                 marketState == "Compression / Chop" ? color.gray :
+                 marketState == "Exhaustion / Overextended" ? color.orange : color.yellow
+    
+    label.new(bar_index, high, marketState, 
+              style=label.style_label_down, 
+              color=labelColor, 
+              textcolor=color.white, 
+              size=size.small)
+
+lastMarketState := marketState
+
+// === Dashboard ===
+if showDashboard
+    var table dashboard = table.new(position.top_right, 2, 12, border_width=1)
+    
+    if barstate.islast
+        // Header
+        table.cell(dashboard, 0, 0, "Market State Validator", bgcolor=color.new(color.blue, 80), text_color=color.white, text_size=size.normal)
+        table.cell(dashboard, 1, 0, "", bgcolor=color.new(color.blue, 80))
+        
+        // Consensus
+        consensusColor = consensusMode == "CALL OK" ? color.green : 
+                        consensusMode == "PUT OK" ? color.red : 
+                        consensusMode == "STAND DOWN" ? color.orange : color.gray
+        table.cell(dashboard, 0, 1, "Consensus", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 1, consensusMode, bgcolor=color.new(consensusColor, 70), text_color=color.white, text_size=size.normal)
+        
+        // Market State
+        table.cell(dashboard, 0, 2, "Market State", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 2, marketState, bgcolor=color.new(color.gray, 80), text_color=color.white)
+        
+        // Bias
+        table.cell(dashboard, 0, 3, "Bias", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 3, biasState, bgcolor=color.new(color.gray, 80), text_color=color.white)
+        
+        // Confidence Scores
+        table.cell(dashboard, 0, 4, "CALL Confidence", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 4, str.tostring(math.round(callConfidence)) + "%", 
+                  bgcolor=callConfidence >= 65 ? color.new(color.green, 80) : color.new(color.gray, 80), 
+                  text_color=color.white)
+        
+        table.cell(dashboard, 0, 5, "PUT Confidence", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 5, str.tostring(math.round(putConfidence)) + "%", 
+                  bgcolor=putConfidence >= 65 ? color.new(color.red, 80) : color.new(color.gray, 80), 
+                  text_color=color.white)
+        
+        // HTF Info
+        htfBiasText = htfBullish ? "BULL (" + str.tostring(math.round(htfBiasStrength)) + "%)" : 
+                     htfBearish ? "BEAR (" + str.tostring(math.round(htfBiasStrength)) + "%)" : "NEUTRAL"
+        table.cell(dashboard, 0, 6, "HTF Bias", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 6, htfBiasText, bgcolor=color.new(color.gray, 80), text_color=color.white)
+        
+        // Regime
+        regimeText = isTrending ? (isStrongTrend ? "STRONG TREND" : "TRENDING") : "RANGING"
+        table.cell(dashboard, 0, 7, "Regime", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 7, regimeText + " (ADX:" + str.tostring(math.round(adx)) + ")", 
+                  bgcolor=color.new(color.gray, 80), text_color=color.white)
+        
+        // Vol Regime
+        table.cell(dashboard, 0, 8, "Volatility", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 8, volRegime, 
+                  bgcolor=volRegime == "LOW" ? color.new(color.orange, 80) : color.new(color.gray, 80), 
+                  text_color=color.white)
+        
+        // Risk Flags
+        riskText = ""
+        if riskChop
+            riskText += "CHOP "
+        if riskLateMove
+            riskText += "LATE "
+        if riskLowVol
+            riskText += "LOW_VOL "
+        if riskExhaustion
+            riskText += "EXHAUSTION "
+        if riskDirectionConflict
+            riskText += "CONFLICT "
+        if riskText == ""
+            riskText := "None"
+        
+        table.cell(dashboard, 0, 9, "Risk Flags", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 9, riskText, 
+                  bgcolor=riskText == "None" ? color.new(color.green, 80) : color.new(color.orange, 80), 
+                  text_color=color.white, text_size=size.small)
+        
+        // Session
+        sessionText = isAsia ? "ASIA" : isLondon ? "LONDON" : isNY ? "NY" : "OTHER"
+        table.cell(dashboard, 0, 10, "Session", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 10, sessionText + " (" + str.tostring(math.round(sessionQualityFinal * 100)) + "%)", 
+                  bgcolor=color.new(color.gray, 80), text_color=color.white)
+        
+        // Order Flow
+        ofText = enableOrderFlow ? (ofBullish ? "BULL" : ofBearish ? "BEAR" : "NEUTRAL") : "OFF"
+        table.cell(dashboard, 0, 11, "Order Flow", bgcolor=color.new(color.gray, 90), text_color=color.white)
+        table.cell(dashboard, 1, 11, ofText, bgcolor=color.new(color.gray, 80), text_color=color.white)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(consensusMode == "CALL OK" and consensusMode[1] != "CALL OK", "CALL OK Signal", "CALL validation signal active")
+alertcondition(consensusMode == "PUT OK" and consensusMode[1] != "PUT OK", "PUT OK Signal", "PUT validation signal active")
+alertcondition(consensusMode == "STAND DOWN" and consensusMode[1] != "STAND DOWN", "Stand Down Alert", "Market conditions unfavorable - stand down")
+alertcondition(longCondition, "Strategy CALL Entry", "Strategy entered CALL validation trade")
+alertcondition(shortCondition, "Strategy PUT Entry", "Strategy entered PUT validation trade")
